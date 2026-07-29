@@ -4,17 +4,31 @@ import { charIndex } from "@shared/grid";
 import {
   CritiqueReportSchema,
   DEFAULT_HARNESS_CONFIG,
+  DraftFailureSchema,
   HarnessConfigSchema,
   IssueSchema,
   LintReportSchema,
   LintWarningSchema,
+  PIPELINE_STATES,
+  PipelineEventSchema,
+  PipelineStateSchema,
   PixelDiffSchema,
+  ReviseSummarySchema,
   RoundSchema,
+  RoundTimingsSchema,
+  STOP_REASONS,
   SessionHistorySchema,
   SizeSchema,
   SpriteDocSchema,
+  StopReasonSchema,
+  type ChatMessage,
+  type ChatTurn,
   type Issue,
+  type PipelineState,
   type SpriteDoc,
+  type StopReason,
+  type ToolCall,
+  type ToolDef,
 } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +36,10 @@ import {
 // ---------------------------------------------------------------------------
 
 const row16 = (ch = ".") => ch.repeat(16);
+
+/** `n` rows of `n` characters — a square canvas of the only three legal sizes. */
+const squareRows = (n: number, ch = ".") =>
+  Array.from({ length: n }, () => ch.repeat(n));
 
 function validDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -42,6 +60,11 @@ function validDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
     },
     ...over,
   };
+}
+
+/** A blank doc at any of the three square sizes. */
+function squareDoc(n: 16 | 32 | 64, over: Record<string, unknown> = {}) {
+  return validDoc({ size: { w: n, h: n }, rows: squareRows(n), ...over });
 }
 
 /**
@@ -79,17 +102,51 @@ const validCritique = (issues: unknown[] = [validIssue()]) => ({
 });
 
 const validLint = () => ({
-  errors: [],
   warnings: [],
   metrics: { coverage: 0.5, paletteUsed: 3, orphanCount: 0, symmetryScore: 1 },
 });
 
+const validTimings = () => ({ draftMs: 31_400, critiqueMs: 12_100, reviseMs: null });
+
+/**
+ * A round in the shape spec §6.7 defines. `diffFromPrev` is `null` on round 1 —
+ * that is the whole point of the nullability, so the default fixture spells it.
+ */
+function validRound(n = 1, over: Record<string, unknown> = {}) {
+  return {
+    round: n,
+    doc: validDoc({ meta: { ...(validDoc().meta as object), round: n } }),
+    lint: validLint(),
+    critique: validCritique(),
+    filteredIssues: [validIssue()],
+    diffFromPrev: n === 1 ? null : [{ x: 1, y: 1, from: ".", to: "2" }],
+    userFeedback: null,
+    revise: null,
+    timings: validTimings(),
+    ...over,
+  };
+}
+
+function validHistory(over: Record<string, unknown> = {}) {
+  return {
+    sessionId: "s-1",
+    config: DEFAULT_HARNESS_CONFIG,
+    rounds: [validRound(1)],
+    draftFailures: [],
+    stopReason: "no-high-severity",
+    finalState: "AWAITING_USER",
+    outcome: "completed",
+    acceptedRound: null,
+    ...over,
+  };
+}
+
 // ---------------------------------------------------------------------------
-// SizeSchema — spec §6.2
+// SizeSchema — spec §6.2. Square only.
 // ---------------------------------------------------------------------------
 
 describe("SizeSchema", () => {
-  it.each([16, 32, 64])("accepts %i", (n) => {
+  it.each([16, 32, 64])("accepts the %i square", (n) => {
     expect(SizeSchema.parse({ w: n, h: n })).toEqual({ w: n, h: n });
   });
 
@@ -99,6 +156,32 @@ describe("SizeSchema", () => {
 
   it("rejects h = 24", () => {
     expect(SizeSchema.safeParse({ w: 16, h: 24 }).success).toBe(false);
+  });
+
+  // -- the v1 shape typed w and h as two independent unions, so all nine
+  // combinations parsed while every consumer assumed three. --------------------
+
+  it.each([
+    [16, 32],
+    [16, 64],
+    [32, 16],
+    [32, 64],
+    [64, 16],
+    [64, 32],
+  ])("rejects the non-square %ix%i", (w, h) => {
+    expect(SizeSchema.safeParse({ w, h }).success).toBe(false);
+  });
+
+  it("rejects a size missing h", () => {
+    expect(SizeSchema.safeParse({ w: 32 }).success).toBe(false);
+  });
+
+  it("rejects a non-square doc even though both dimensions are legal alone", () => {
+    const bad = validDoc({
+      size: { w: 16, h: 64 },
+      rows: Array.from({ length: 64 }, () => row16()),
+    });
+    expect(SpriteDocSchema.safeParse(bad).success).toBe(false);
   });
 });
 
@@ -164,11 +247,7 @@ describe("SpriteDocSchema", () => {
   });
 
   it("validates a 32x32 doc against its own declared size", () => {
-    const doc = validDoc({
-      size: { w: 32, h: 32 },
-      rows: Array.from({ length: 32 }, () => ".".repeat(32)),
-    });
-    expect(SpriteDocSchema.safeParse(doc).success).toBe(true);
+    expect(SpriteDocSchema.safeParse(squareDoc(32)).success).toBe(true);
   });
 
   it("defaults meta.repairedRows to an empty list", () => {
@@ -326,22 +405,73 @@ describe("SpriteDocSchema", () => {
     },
   );
 
+  // -- A4 at the larger canvases (plan step 2c.5) ----------------------------
+  //
+  // Every A4 fixture above is 16x16 at palette size 4 or 16, so a refinement
+  // gated on `size.w === 16` — or one that reads a hard-coded 16 as the row
+  // width or row count — passes the entire suite. These pin the same rule at
+  // the other two legal canvases.
+
+  it("rejects an off-palette character at 32x32", () => {
+    const rows = squareRows(32);
+    rows[20] = ".".repeat(9) + "9" + ".".repeat(22);
+    const res = SpriteDocSchema.safeParse(squareDoc(32, { rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const paths = res.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("rows.20");
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 20 char 9 is '9'/);
+    }
+  });
+
+  it("rejects an off-palette character in the last cell of a 32x32 canvas", () => {
+    // (31, 31): the cell that both an x and a y off-by-one hide, at a size no
+    // other fixture visits.
+    const rows = squareRows(32);
+    rows[31] = ".".repeat(31) + "f";
+    const res = SpriteDocSchema.safeParse(squareDoc(32, { rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 31 char 31 is 'f'/);
+    }
+  });
+
+  it("accepts the same 32x32 rows once the palette carries 16 colours", () => {
+    // The paired accept: proves the rejection above is about the palette, not
+    // about the canvas size or the character.
+    const rows = squareRows(32);
+    rows[20] = ".".repeat(9) + "9" + ".".repeat(22);
+    rows[31] = ".".repeat(31) + "f";
+    expect(
+      SpriteDocSchema.safeParse(squareDoc(32, { rows, palette: PALETTE_16 })).success,
+    ).toBe(true);
+  });
+
+  it("rejects an off-palette character at 64x64", () => {
+    const rows = squareRows(64);
+    rows[63] = ".".repeat(63) + "e";
+    const res = SpriteDocSchema.safeParse(squareDoc(64, { rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 63 char 63 is 'e'/);
+    }
+  });
+
+  it("still checks row width at 32x32", () => {
+    const rows = squareRows(32);
+    rows[7] = ".".repeat(31);
+    expect(SpriteDocSchema.safeParse(squareDoc(32, { rows })).success).toBe(false);
+  });
+
   it("rejects an off-palette doc nested in a SessionHistory round", () => {
     const rows = Array.from({ length: 16 }, () => row16());
     rows[0] = "ffffffffffffffff";
-    const bad = {
-      sessionId: "s-1",
-      config: DEFAULT_HARNESS_CONFIG,
-      rounds: [
-        {
-          round: 0,
-          doc: validDoc({ rows }),
-          critique: null,
-          lint: validLint(),
-          diffFromPrev: [],
-        },
-      ],
-    };
+    const bad = validHistory({
+      rounds: [validRound(1, { doc: validDoc({ rows }) })],
+    });
+    // The rest of the history is well-formed, so the only thing this can fail
+    // on is the nested doc.
+    expect(SessionHistorySchema.safeParse(validHistory()).success).toBe(true);
     expect(SessionHistorySchema.safeParse(bad).success).toBe(false);
   });
 });
@@ -430,17 +560,75 @@ describe("CritiqueReportSchema", () => {
       false,
     );
   });
+
+  // -- degraded reports (spec §6.4) -----------------------------------------
+  //
+  // A degraded report previously had to invent a 1-5 score and a `readsAs`
+  // sentence, which then landed in `SessionHistory` and polluted every
+  // bench-derived quality metric.
+
+  it("accepts the degraded report spec §6.4 names, verbatim", () => {
+    const degraded = {
+      readsAs: null,
+      matchesIntent: false,
+      overall: null,
+      degraded: true,
+      issues: [],
+    };
+    const parsed = CritiqueReportSchema.parse(degraded);
+    expect(parsed.degraded).toBe(true);
+    expect(parsed.overall).toBeNull();
+    expect(parsed.readsAs).toBeNull();
+  });
+
+  it("accepts overall = null on its own", () => {
+    const parsed = CritiqueReportSchema.parse({ ...validCritique(), overall: null });
+    expect(parsed.overall).toBeNull();
+  });
+
+  it("accepts readsAs = null on its own", () => {
+    const parsed = CritiqueReportSchema.parse({ ...validCritique(), readsAs: null });
+    expect(parsed.readsAs).toBeNull();
+  });
+
+  it("carries degraded: false on a report that parsed cleanly", () => {
+    // The critic never emits this field — it is a harness-side verdict, and
+    // §6.4's repair table does not list it. A clean report therefore has to
+    // arrive at `false` without the model's help, or every real critique would
+    // fail validation and degrade.
+    const parsed = CritiqueReportSchema.parse(validCritique());
+    expect(parsed.degraded).toBe(false);
+  });
+
+  it("keeps an explicit degraded: true rather than overwriting it", () => {
+    const parsed = CritiqueReportSchema.parse({ ...validCritique(), degraded: true });
+    expect(parsed.degraded).toBe(true);
+  });
+
+  it("rejects a non-boolean degraded", () => {
+    expect(
+      CritiqueReportSchema.safeParse({ ...validCritique(), degraded: "yes" }).success,
+    ).toBe(false);
+  });
+
+  it("still rejects matchesIntent = null — only overall and readsAs are nullable", () => {
+    expect(
+      CritiqueReportSchema.safeParse({ ...validCritique(), matchesIntent: null }).success,
+    ).toBe(false);
+  });
+
+  it("still rejects issues = null", () => {
+    expect(
+      CritiqueReportSchema.safeParse({ ...validCritique(), issues: null }).success,
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// LintReportSchema — spec §6.5
+// LintWarningSchema / LintReportSchema — spec §6.5
 // ---------------------------------------------------------------------------
 
-describe("LintReportSchema", () => {
-  it("accepts an empty report", () => {
-    expect(LintReportSchema.safeParse(validLint()).success).toBe(true);
-  });
-
+describe("LintWarningSchema", () => {
   it.each([
     "orphan-pixel",
     "unused-palette-entry",
@@ -467,9 +655,132 @@ describe("LintReportSchema", () => {
     ).toBe(false);
   });
 
+  // -- `indices` (spec §6.5) ------------------------------------------------
+  //
+  // "so consumers do not have to regex free text to learn which palette entry a
+  // warning concerns." A `low-contrast` warning carries the pair, an
+  // `unused-palette-entry` carries the single index.
+
+  it("keeps the index pair a low-contrast warning concerns", () => {
+    const parsed = LintWarningSchema.parse({
+      code: "low-contrast",
+      cells: [
+        [3, 4],
+        [4, 4],
+      ],
+      indices: [2, 3],
+      message: "indices 2 and 3 differ by 0.079 in relative luminance",
+    });
+    expect(parsed.indices).toEqual([2, 3]);
+  });
+
+  it("keeps the single index an unused-palette-entry warning concerns", () => {
+    const parsed = LintWarningSchema.parse({
+      code: "unused-palette-entry",
+      cells: [],
+      indices: [7],
+      message: "palette index 7 is never used",
+    });
+    expect(parsed.indices).toEqual([7]);
+    expect(parsed.cells).toEqual([]);
+  });
+
+  it("leaves indices absent on the codes that do not carry one", () => {
+    const parsed = LintWarningSchema.parse({
+      code: "orphan-pixel",
+      cells: [[1, 2]],
+      message: "m",
+    });
+    expect(parsed.indices).toBeUndefined();
+    expect("indices" in parsed).toBe(false);
+  });
+
+  it.each([16, 99, -1, 1.5])("rejects the unencodable index %s", (i) => {
+    expect(
+      LintWarningSchema.safeParse({
+        code: "unused-palette-entry",
+        cells: [],
+        indices: [i],
+        message: "m",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects indices that is not an array", () => {
+    expect(
+      LintWarningSchema.safeParse({
+        code: "low-contrast",
+        cells: [],
+        indices: 3,
+        message: "m",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("LintReportSchema", () => {
+  it("accepts a report with no errors field — there is no errors field", () => {
+    expect(LintReportSchema.safeParse(validLint()).success).toBe(true);
+  });
+
   it("rejects a symmetryScore above 1", () => {
     const bad = { ...validLint(), metrics: { ...validLint().metrics, symmetryScore: 1.2 } };
     expect(LintReportSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("accepts symmetryScore 1 on a blank sprite — 0/0 is trivially symmetric", () => {
+    const blank = {
+      warnings: [],
+      metrics: { coverage: 0, paletteUsed: 0, orphanCount: 0, symmetryScore: 1 },
+    };
+    expect(LintReportSchema.safeParse(blank).success).toBe(true);
+  });
+
+  it("rejects NaN as a symmetryScore", () => {
+    // `0/0` on an all-transparent sprite. NaN serializes to `null`, so without
+    // this it surfaces as an opaque round-trip failure two stages from cause.
+    const bad = {
+      warnings: [],
+      metrics: { coverage: 0, paletteUsed: 0, orphanCount: 0, symmetryScore: NaN },
+    };
+    expect(LintReportSchema.safeParse(bad).success).toBe(false);
+  });
+
+  // -- ruling R3: `errors` is deleted, not deprecated ------------------------
+
+  it("rejects a report carrying an empty errors array", () => {
+    // The shape amendment A2 shipped and ruling R3 deleted. A stale producer
+    // must fail loudly rather than have the field silently stripped — a
+    // stripped `errors` is a schema violation the pipeline was told about and
+    // then forgot.
+    expect(LintReportSchema.safeParse({ ...validLint(), errors: [] }).success).toBe(false);
+  });
+
+  it("rejects a report carrying a populated errors array", () => {
+    expect(
+      LintReportSchema.safeParse({
+        ...validLint(),
+        errors: ["rows.length !== size.h"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("a parsed report has no errors key at all", () => {
+    const parsed = LintReportSchema.parse(validLint());
+    expect("errors" in parsed).toBe(false);
+  });
+
+  it("rejects any unknown key, not just errors", () => {
+    // Pins the mechanism: the report is a closed vocabulary, so the rejection
+    // above cannot be satisfied by special-casing one field name.
+    expect(
+      LintReportSchema.safeParse({ ...validLint(), severity: "high" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a round whose lint report carries errors", () => {
+    const bad = validRound(1, { lint: { ...validLint(), errors: [] } });
+    expect(RoundSchema.safeParse(bad).success).toBe(false);
   });
 });
 
@@ -491,7 +802,7 @@ describe("HarnessConfigSchema", () => {
       confidenceFloor: 0.3,
       suggestConfidenceFloor: 0.5,
       stopOnNoHighSeverity: true,
-      criticUpscale: 16,
+      criticTargetPx: 512,
       callTimeoutMs: 120000,
       models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
     });
@@ -521,6 +832,36 @@ describe("HarnessConfigSchema", () => {
 
   it("rejects a non-integer maxRounds", () => {
     expect(HarnessConfigSchema.safeParse({ maxRounds: 2.5 }).success).toBe(false);
+  });
+
+  // -- criticUpscale -> criticTargetPx (spec §6.8) --------------------------
+
+  it("defaults criticTargetPx to 512", () => {
+    expect(HarnessConfigSchema.parse({}).criticTargetPx).toBe(512);
+  });
+
+  it("carries no criticUpscale on a defaulted config", () => {
+    // A fixed x16 multiplier renders 64x64 to 1024px for the vision encoder to
+    // downsample away. `criticTargetPx` is a target: the scale is derived as
+    // `max(1, floor(criticTargetPx / size.w))`.
+    expect("criticUpscale" in HarnessConfigSchema.parse({})).toBe(false);
+    expect("criticUpscale" in DEFAULT_HARNESS_CONFIG).toBe(false);
+  });
+
+  it("honours a criticTargetPx override", () => {
+    expect(HarnessConfigSchema.parse({ criticTargetPx: 256 }).criticTargetPx).toBe(256);
+  });
+
+  it.each([0, -1, 1.5])("rejects criticTargetPx = %s", (v) => {
+    expect(HarnessConfigSchema.safeParse({ criticTargetPx: v }).success).toBe(false);
+  });
+
+  it("derives the spec's scale for each canvas from the default target", () => {
+    // Pins the number against its purpose rather than against itself: 512 is
+    // the value that keeps every legal canvas at or under ~512px.
+    const { criticTargetPx } = HarnessConfigSchema.parse({});
+    const scaleFor = (w: number) => Math.max(1, Math.floor(criticTargetPx / w));
+    expect([16, 32, 64].map((w) => scaleFor(w) * w)).toEqual([512, 512, 512]);
   });
 });
 
@@ -552,39 +893,726 @@ describe("PixelDiffSchema", () => {
   });
 });
 
-describe("SessionHistorySchema", () => {
-  const round = (n: number) => ({
-    round: n,
-    doc: validDoc({ meta: { ...(validDoc().meta as object), round: n } }),
-    critique: n === 0 ? null : validCritique(),
-    lint: validLint(),
-    diffFromPrev: n === 0 ? [] : [{ x: 1, y: 1, from: ".", to: "2" }],
-  });
-
+describe("RoundSchema", () => {
   it("accepts a round with a null critique", () => {
-    expect(RoundSchema.safeParse(round(0)).success).toBe(true);
+    expect(RoundSchema.safeParse(validRound(1, { critique: null })).success).toBe(true);
   });
 
-  it("embeds the harness config verbatim and round-trips through JSON", () => {
-    const history = {
-      sessionId: "s-1",
-      config: DEFAULT_HARNESS_CONFIG,
-      rounds: [round(0), round(1)],
-    };
-    const parsed = SessionHistorySchema.parse(history);
+  // -- diffFromPrev nullability — the sharpest edge in §6.7 ------------------
+
+  it("accepts diffFromPrev: null — the first round has no predecessor", () => {
+    const parsed = RoundSchema.parse(validRound(1, { diffFromPrev: null }));
+    expect(parsed.diffFromPrev).toBeNull();
+  });
+
+  it("accepts diffFromPrev: [] — the revise stage ran and changed nothing", () => {
+    const parsed = RoundSchema.parse(validRound(2, { diffFromPrev: [] }));
+    expect(parsed.diffFromPrev).toEqual([]);
+  });
+
+  it("keeps null and [] distinguishable after parsing", () => {
+    // Non-nullable made "this is the first round" and "the revise stage changed
+    // nothing" the same value, and spec §6.7 v1 pointed the `empty-diff` stop
+    // condition straight at the stored field — so a literal implementation
+    // stopped every run right after the draft with a bogus stop reason.
+    const first = RoundSchema.parse(validRound(1, { diffFromPrev: null }));
+    const noop = RoundSchema.parse(validRound(2, { diffFromPrev: [] }));
+    expect(first.diffFromPrev).toBeNull();
+    expect(noop.diffFromPrev).toEqual([]);
+    expect(first.diffFromPrev).not.toEqual(noop.diffFromPrev);
+    expect(first.diffFromPrev === null).toBe(true);
+    expect(noop.diffFromPrev === null).toBe(false);
+    // ...and they survive a JSON round trip still distinguishable.
+    const rt = (r: unknown) => JSON.parse(JSON.stringify(r)).diffFromPrev;
+    expect(rt(first)).toBeNull();
+    expect(rt(noop)).toEqual([]);
+  });
+
+  it("accepts a populated diffFromPrev", () => {
+    const diffs = [{ x: 1, y: 1, from: ".", to: "2" }];
+    const parsed = RoundSchema.parse(validRound(2, { diffFromPrev: diffs }));
+    expect(parsed.diffFromPrev).toEqual(diffs);
+  });
+
+  it("rejects diffFromPrev entries that are not pixel diffs", () => {
+    expect(
+      RoundSchema.safeParse(validRound(2, { diffFromPrev: [{ x: 1, y: 1 }] })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a round missing diffFromPrev entirely", () => {
+    const { diffFromPrev: _drop, ...rest } = validRound(1);
+    expect(RoundSchema.safeParse(rest).success).toBe(false);
+  });
+
+  // -- filteredIssues: what the revise stage actually received ---------------
+
+  it("stores filteredIssues separately from the raw critique", () => {
+    // Storing only the filtered report destroys the data needed to tune
+    // `confidenceFloor`; storing only the raw one shows the UI `suggest` text
+    // the agent never received. Both, or one of those two breaks.
+    const raw = validCritique([
+      validIssue(),
+      validIssue({ id: "i2", confidence: 0.1, suggest: "guess" }),
+    ]);
+    const parsed = RoundSchema.parse(
+      validRound(1, { critique: raw, filteredIssues: [validIssue()] }),
+    );
+    expect(parsed.critique?.issues).toHaveLength(2);
+    expect(parsed.filteredIssues).toHaveLength(1);
+    expect(parsed.filteredIssues[0].id).toBe("i1");
+  });
+
+  it("accepts an empty filteredIssues list", () => {
+    expect(RoundSchema.safeParse(validRound(1, { filteredIssues: [] })).success).toBe(true);
+  });
+
+  it("rejects a round missing filteredIssues", () => {
+    const { filteredIssues: _drop, ...rest } = validRound(1);
+    expect(RoundSchema.safeParse(rest).success).toBe(false);
+  });
+
+  it("rejects a filteredIssues entry that is not an Issue", () => {
+    expect(
+      RoundSchema.safeParse(validRound(1, { filteredIssues: [{ id: "x" }] })).success,
+    ).toBe(false);
+  });
+
+  // -- userFeedback ---------------------------------------------------------
+
+  it("records the user's own words", () => {
+    const parsed = RoundSchema.parse(
+      validRound(2, { userFeedback: "make the tail bushier" }),
+    );
+    expect(parsed.userFeedback).toBe("make the tail bushier");
+  });
+
+  it("accepts userFeedback: null on a round the user did not drive", () => {
+    expect(RoundSchema.parse(validRound(1)).userFeedback).toBeNull();
+  });
+
+  it("rejects a round missing userFeedback", () => {
+    const { userFeedback: _drop, ...rest } = validRound(1);
+    expect(RoundSchema.safeParse(rest).success).toBe(false);
+  });
+
+  // -- revise ---------------------------------------------------------------
+
+  it("records the revise stage's own account of what it did", () => {
+    const parsed = RoundSchema.parse(
+      validRound(2, {
+        revise: { turns: 12, hitCap: false, summary: "darkened the inner ear" },
+      }),
+    );
+    expect(parsed.revise).toEqual({
+      turns: 12,
+      hitCap: false,
+      summary: "darkened the inner ear",
+    });
+  });
+
+  it("accepts revise: null on a round that skipped REVISING", () => {
+    expect(RoundSchema.parse(validRound(1, { revise: null })).revise).toBeNull();
+  });
+
+  it("records hitCap so the bench can surface an exhausted turn budget", () => {
+    const parsed = RoundSchema.parse(
+      validRound(2, { revise: { turns: 40, hitCap: true, summary: "" } }),
+    );
+    expect(parsed.revise?.hitCap).toBe(true);
+    expect(parsed.revise?.turns).toBe(40);
+  });
+
+  it("rejects a revise block missing hitCap", () => {
+    expect(
+      RoundSchema.safeParse(validRound(2, { revise: { turns: 3, summary: "x" } })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a negative revise turn count", () => {
+    expect(
+      RoundSchema.safeParse(
+        validRound(2, { revise: { turns: -1, hitCap: false, summary: "" } }),
+      ).success,
+    ).toBe(false);
+  });
+
+  it("rejects a round missing revise", () => {
+    const { revise: _drop, ...rest } = validRound(1);
+    expect(RoundSchema.safeParse(rest).success).toBe(false);
+  });
+
+  // -- timings --------------------------------------------------------------
+
+  it("records per-stage wall clock", () => {
+    const parsed = RoundSchema.parse(
+      validRound(1, { timings: { draftMs: 31_400, critiqueMs: 12_100, reviseMs: 25_000 } }),
+    );
+    expect(parsed.timings).toEqual({
+      draftMs: 31_400,
+      critiqueMs: 12_100,
+      reviseMs: 25_000,
+    });
+  });
+
+  it("accepts a null for every stage that did not run this round", () => {
+    // Round 2 has no draft; a converged round has no revise.
+    const parsed = RoundSchema.parse(
+      validRound(2, { timings: { draftMs: null, critiqueMs: 9_000, reviseMs: null } }),
+    );
+    expect(parsed.timings.draftMs).toBeNull();
+    expect(parsed.timings.reviseMs).toBeNull();
+    expect(parsed.timings.critiqueMs).toBe(9_000);
+  });
+
+  it("rejects a round missing timings", () => {
+    const { timings: _drop, ...rest } = validRound(1);
+    expect(RoundSchema.safeParse(rest).success).toBe(false);
+  });
+
+  it("rejects a timings block missing a stage", () => {
+    expect(
+      RoundSchema.safeParse(validRound(1, { timings: { draftMs: 1, critiqueMs: 2 } }))
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects a negative duration", () => {
+    expect(
+      RoundSchema.safeParse(
+        validRound(1, { timings: { draftMs: -1, critiqueMs: null, reviseMs: null } }),
+      ).success,
+    ).toBe(false);
+  });
+});
+
+describe("SessionHistorySchema", () => {
+  it("accepts a fully-formed history", () => {
+    expect(SessionHistorySchema.safeParse(validHistory()).success).toBe(true);
+  });
+
+  it("rejects an empty object", () => {
+    expect(SessionHistorySchema.safeParse({}).success).toBe(false);
+  });
+
+  it("embeds the harness config verbatim", () => {
+    const parsed = SessionHistorySchema.parse(
+      validHistory({ rounds: [validRound(1), validRound(2)] }),
+    );
     expect(parsed.config).toEqual(DEFAULT_HARNESS_CONFIG);
     expect(parsed.rounds).toHaveLength(2);
-
-    const reparsed = SessionHistorySchema.parse(JSON.parse(JSON.stringify(parsed)));
-    expect(reparsed).toEqual(parsed);
   });
 
   it("rejects a history whose round carries a malformed doc", () => {
-    const bad = {
-      sessionId: "s-1",
-      config: DEFAULT_HARNESS_CONFIG,
-      rounds: [{ ...round(0), doc: validDoc({ rows: [] }) }],
-    };
+    const bad = validHistory({
+      rounds: [validRound(1, { doc: validDoc({ rows: [] }) })],
+    });
     expect(SessionHistorySchema.safeParse(bad).success).toBe(false);
+  });
+
+  // -- draftFailures --------------------------------------------------------
+
+  it("records a rejected draft, which has no valid SpriteDoc and so cannot be a Round", () => {
+    const parsed = SessionHistorySchema.parse(
+      validHistory({
+        rounds: [],
+        outcome: "failed",
+        finalState: "FAILED",
+        stopReason: null,
+        draftFailures: [
+          {
+            attempt: 1,
+            raw: "Sure! Here is a fox:\n\n(a picture of a fox)",
+            repairs: 256,
+            reason: "unparseable output; charged 256 repairs against 256 cells",
+          },
+          { attempt: 2, raw: "```\n....\n```", repairs: 240, reason: "repairs over threshold" },
+        ],
+      }),
+    );
+    expect(parsed.draftFailures).toHaveLength(2);
+    expect(parsed.draftFailures[1].attempt).toBe(2);
+    expect(parsed.draftFailures[0].raw).toMatch(/a picture of a fox/);
+  });
+
+  it("rejects a history missing draftFailures", () => {
+    const { draftFailures: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  it("rejects a draft failure missing its raw output", () => {
+    const bad = validHistory({
+      draftFailures: [{ attempt: 1, repairs: 10, reason: "over threshold" }],
+    });
+    expect(SessionHistorySchema.safeParse(bad).success).toBe(false);
+  });
+
+  // -- stopReason / finalState / outcome / acceptedRound --------------------
+
+  it.each(["no-high-severity", "round-cap", "empty-diff", "critic-failed"])(
+    "accepts stopReason %s",
+    (r) => {
+      expect(SessionHistorySchema.safeParse(validHistory({ stopReason: r })).success).toBe(
+        true,
+      );
+    },
+  );
+
+  it("accepts stopReason: null for a run that has not stopped", () => {
+    expect(SessionHistorySchema.parse(validHistory({ stopReason: null })).stopReason).toBe(
+      null,
+    );
+  });
+
+  it("rejects a stop reason outside the spec §7.2 table", () => {
+    expect(
+      SessionHistorySchema.safeParse(validHistory({ stopReason: "converged" })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a history missing stopReason", () => {
+    const { stopReason: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  it.each([
+    "IDLE",
+    "DRAFTING",
+    "LINTING",
+    "CRITIQUING",
+    "REVISING",
+    "AWAITING_USER",
+    "DONE",
+    "FAILED",
+  ])("accepts finalState %s", (s) => {
+    expect(SessionHistorySchema.safeParse(validHistory({ finalState: s })).success).toBe(
+      true,
+    );
+  });
+
+  it("rejects a state outside the spec §7.1 machine", () => {
+    expect(
+      SessionHistorySchema.safeParse(validHistory({ finalState: "RUNNING" })).success,
+    ).toBe(false);
+  });
+
+  it.each(["completed", "failed"])("accepts outcome %s", (o) => {
+    expect(SessionHistorySchema.safeParse(validHistory({ outcome: o })).success).toBe(true);
+  });
+
+  it("rejects an outcome outside completed | failed", () => {
+    expect(
+      SessionHistorySchema.safeParse(validHistory({ outcome: "partial" })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a history missing outcome", () => {
+    const { outcome: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  it("records which round the user accepted — any round, not only the last", () => {
+    const parsed = SessionHistorySchema.parse(
+      validHistory({
+        rounds: [validRound(1), validRound(2), validRound(3)],
+        acceptedRound: 2,
+        finalState: "DONE",
+      }),
+    );
+    expect(parsed.acceptedRound).toBe(2);
+    expect(parsed.finalState).toBe("DONE");
+  });
+
+  it("accepts acceptedRound: null before the gate is answered", () => {
+    expect(SessionHistorySchema.parse(validHistory()).acceptedRound).toBeNull();
+  });
+
+  it("rejects a negative acceptedRound", () => {
+    expect(
+      SessionHistorySchema.safeParse(validHistory({ acceptedRound: -1 })).success,
+    ).toBe(false);
+  });
+
+  it("rejects a history missing acceptedRound", () => {
+    const { acceptedRound: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  // -- the round trip -------------------------------------------------------
+
+  it("round-trips a fully-populated history through JSON unchanged", () => {
+    // Every optional and nullable field carries a value, so nothing can pass by
+    // being absent on both sides: the doc's optional intent fields, a lint
+    // warning with `indices`, a non-null `revise`, three non-null timings,
+    // `userFeedback`, a populated `draftFailures`, and `acceptedRound`.
+    const fully = {
+      sessionId: "s-full",
+      config: { ...DEFAULT_HARNESS_CONFIG, maxRounds: 2, criticTargetPx: 256 },
+      rounds: [
+        {
+          round: 1,
+          doc: validDoc({
+            id: "doc-round-1",
+            intent: {
+              subject: "red fox, sitting",
+              style: "chunky outline",
+              facing: "three-quarter",
+              notes: "keep the tail readable",
+            },
+            palette: PALETTE_16,
+            rows: (() => {
+              const rows = Array.from({ length: 16 }, () => row16());
+              rows[8] = "0123456789abcdef";
+              return rows;
+            })(),
+            meta: {
+              generatorModel: "qwen3:8b",
+              criticModel: "qwen3-vl:8b-instruct-q4_K_M",
+              round: 1,
+              repairs: 3,
+              repairedRows: [8, 9],
+              parentId: null,
+            },
+          }),
+          lint: {
+            warnings: [
+              {
+                code: "low-contrast",
+                cells: [
+                  [3, 8],
+                  [4, 8],
+                ],
+                indices: [2, 3],
+                message: "indices 2 and 3 differ by 0.079",
+              },
+              { code: "row-repaired", cells: [[0, 8]], message: "row 8 was repaired" },
+            ],
+            metrics: {
+              coverage: 0.0625,
+              paletteUsed: 16,
+              orphanCount: 2,
+              symmetryScore: 0.5,
+            },
+          },
+          critique: {
+            readsAs: "a fox, though the ears are ambiguous",
+            matchesIntent: true,
+            overall: 4,
+            degraded: false,
+            issues: [
+              validIssue(),
+              validIssue({ id: "i2", severity: "low", confidence: 0.2, suggest: "guess" }),
+            ],
+          },
+          filteredIssues: [validIssue()],
+          diffFromPrev: null,
+          userFeedback: "make the tail bushier",
+          revise: { turns: 12, hitCap: false, summary: "darkened the inner ear" },
+          timings: { draftMs: 31_400, critiqueMs: 12_100, reviseMs: 25_000 },
+        },
+        {
+          round: 2,
+          doc: validDoc({ id: "doc-round-2", meta: { ...(validDoc().meta as object), round: 2, parentId: "doc-round-1" } }),
+          lint: validLint(),
+          critique: {
+            readsAs: null,
+            matchesIntent: false,
+            overall: null,
+            degraded: true,
+            issues: [],
+          },
+          filteredIssues: [],
+          diffFromPrev: [{ x: 1, y: 1, from: ".", to: "2" }],
+          userFeedback: null,
+          revise: { turns: 40, hitCap: true, summary: "" },
+          timings: { draftMs: null, critiqueMs: 9_000, reviseMs: null },
+        },
+      ],
+      draftFailures: [
+        { attempt: 1, raw: "prose, not rows", repairs: 256, reason: "unparseable" },
+      ],
+      stopReason: "critic-failed",
+      finalState: "AWAITING_USER",
+      outcome: "completed",
+      acceptedRound: 1,
+    };
+
+    const parsed = SessionHistorySchema.parse(fully);
+    const reparsed = SessionHistorySchema.parse(JSON.parse(JSON.stringify(parsed)));
+
+    expect(reparsed).toEqual(parsed);
+    // Byte-for-byte, not merely deep-equal: a field that JSON drops (an
+    // `undefined`) or reorders would survive `toEqual` and fail here.
+    expect(JSON.stringify(reparsed)).toBe(JSON.stringify(parsed));
+
+    // And the fields that exist precisely to be readable off the artifact.
+    expect(parsed.rounds[0].revise?.summary).toBe("darkened the inner ear");
+    expect(parsed.rounds[0].userFeedback).toBe("make the tail bushier");
+    expect(parsed.rounds[0].diffFromPrev).toBeNull();
+    expect(parsed.rounds[0].lint.warnings[0].indices).toEqual([2, 3]);
+    expect(parsed.rounds[1].critique?.degraded).toBe(true);
+    expect(parsed.rounds[1].critique?.overall).toBeNull();
+    expect(parsed.rounds[1].revise?.hitCap).toBe(true);
+    expect(parsed.stopReason).toBe("critic-failed");
+    expect(parsed.acceptedRound).toBe(1);
+    expect(parsed.config.criticTargetPx).toBe(256);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PipelineState / StopReason / PipelineEvent — spec §5.2, §7.1, §7.2
+//
+// These live in `shared/` rather than `main/pipeline.ts` because preload and
+// the renderer consume them, and a *value* import of `@main/pipeline` from the
+// renderer bundle would pull `node:http` in behind it.
+// ---------------------------------------------------------------------------
+
+describe("PipelineStateSchema", () => {
+  it("holds exactly the eight states in spec §7.1's diagram", () => {
+    expect([...PIPELINE_STATES]).toEqual([
+      "IDLE",
+      "DRAFTING",
+      "LINTING",
+      "CRITIQUING",
+      "REVISING",
+      "AWAITING_USER",
+      "DONE",
+      "FAILED",
+    ]);
+  });
+
+  it.each(PIPELINE_STATES)("accepts %s", (s) => {
+    expect(PipelineStateSchema.parse(s)).toBe(s);
+  });
+
+  it.each(["RUNNING", "drafting", "PAUSED", ""])("rejects %s", (s) => {
+    expect(PipelineStateSchema.safeParse(s).success).toBe(false);
+  });
+
+  it("types a state variable without a value import from main", () => {
+    const s: PipelineState = "AWAITING_USER";
+    expect(PipelineStateSchema.parse(s)).toBe("AWAITING_USER");
+  });
+});
+
+describe("StopReasonSchema", () => {
+  it("holds exactly the four reasons in spec §7.2's table", () => {
+    expect([...STOP_REASONS]).toEqual([
+      "no-high-severity",
+      "round-cap",
+      "empty-diff",
+      "critic-failed",
+    ]);
+  });
+
+  it.each(STOP_REASONS)("accepts %s", (r) => {
+    expect(StopReasonSchema.parse(r)).toBe(r);
+  });
+
+  it.each(["converged", "user-accepted", "no-high-sev"])("rejects %s", (r) => {
+    expect(StopReasonSchema.safeParse(r).success).toBe(false);
+  });
+
+  it("keeps critic-failed distinct from no-high-severity", () => {
+    // Without the distinction a broken critic reports success and the user is
+    // told the sprite passed a critique that never ran.
+    const a: StopReason = "critic-failed";
+    const b: StopReason = "no-high-severity";
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("PipelineEventSchema", () => {
+  it("carries a state transition — §7.1: every transition emits a typed event", () => {
+    const parsed = PipelineEventSchema.parse({
+      type: "state",
+      state: "CRITIQUING",
+      round: 2,
+    });
+    expect(parsed).toEqual({ type: "state", state: "CRITIQUING", round: 2 });
+  });
+
+  it("rejects a state event naming a state outside the machine", () => {
+    expect(
+      PipelineEventSchema.safeParse({ type: "state", state: "PAUSED", round: 1 }).success,
+    ).toBe(false);
+  });
+
+  it("carries per-turn revise progress — §7.1: REVISING emits per-turn progress", () => {
+    // The longest stage in the design. Without this the status bar shows one
+    // static REVISING label for up to 40 model turns.
+    const parsed = PipelineEventSchema.parse({
+      type: "revise-turn",
+      round: 2,
+      turn: 7,
+      maxTurns: 40,
+    });
+    expect(parsed).toEqual({ type: "revise-turn", round: 2, turn: 7, maxTurns: 40 });
+  });
+
+  it("rejects a turn number of zero — turns are 1-based", () => {
+    expect(
+      PipelineEventSchema.safeParse({
+        type: "revise-turn",
+        round: 1,
+        turn: 0,
+        maxTurns: 40,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("carries a whole round snapshot", () => {
+    // `run()` resolves only at the gate, minutes later, and the Api has no
+    // method to read an in-progress history — so a mid-run filmstrip frame can
+    // only come from the event.
+    const parsed = PipelineEventSchema.parse({
+      type: "round",
+      snapshot: validRound(1),
+    });
+    expect(parsed.type).toBe("round");
+    if (parsed.type === "round") {
+      expect(parsed.snapshot.round).toBe(1);
+      expect(parsed.snapshot.diffFromPrev).toBeNull();
+    }
+  });
+
+  it("rejects a round event whose snapshot is not a valid Round", () => {
+    const { timings: _drop, ...rest } = validRound(1);
+    expect(PipelineEventSchema.safeParse({ type: "round", snapshot: rest }).success).toBe(
+      false,
+    );
+  });
+
+  it("rejects an event type outside the union", () => {
+    expect(PipelineEventSchema.safeParse({ type: "progress", pct: 50 }).success).toBe(false);
+  });
+
+  it("rejects an event with no type at all", () => {
+    expect(PipelineEventSchema.safeParse({ state: "IDLE", round: 0 }).success).toBe(false);
+  });
+
+  it("survives the JSON round trip an IPC push channel puts it through", () => {
+    const e = PipelineEventSchema.parse({ type: "round", snapshot: validRound(2) });
+    expect(PipelineEventSchema.parse(JSON.parse(JSON.stringify(e)))).toEqual(e);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The §6.7 sub-schemas, exported so Waves 9 and 13 can build and read them
+// without reconstructing the shapes by hand.
+// ---------------------------------------------------------------------------
+
+describe("§6.7 sub-schemas", () => {
+  it("ReviseSummarySchema is revise()'s own return shape", () => {
+    expect(
+      ReviseSummarySchema.parse({ turns: 12, hitCap: false, summary: "done" }),
+    ).toEqual({ turns: 12, hitCap: false, summary: "done" });
+  });
+
+  it("RoundTimingsSchema allows a null per stage", () => {
+    expect(
+      RoundTimingsSchema.parse({ draftMs: null, critiqueMs: 1, reviseMs: null }),
+    ).toEqual({ draftMs: null, critiqueMs: 1, reviseMs: null });
+  });
+
+  it("DraftFailureSchema numbers its attempts from 1", () => {
+    expect(
+      DraftFailureSchema.safeParse({ attempt: 0, raw: "x", repairs: 1, reason: "y" })
+        .success,
+    ).toBe(false);
+    expect(
+      DraftFailureSchema.safeParse({ attempt: 1, raw: "x", repairs: 1, reason: "y" })
+        .success,
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ollama client contract types — spec §6.9
+//
+// These are compile-time contracts, so `npx tsc --noEmit` is what actually
+// fails when a field is missing: the type annotations below stop typechecking.
+// The runtime assertions pin the field *names*, which is what the Ollama wire
+// format cares about.
+// ---------------------------------------------------------------------------
+
+describe("Ollama client contract types (spec §6.9)", () => {
+  it("an assistant ChatMessage carries the tool calls it made", () => {
+    // Without `tool_calls` the revise loop cannot continue a tool conversation
+    // at all: Ollama's chat template renders the calls off the assistant
+    // message, and without them the tool results arrive unmoored and the model
+    // re-issues calls it has already made, burning the turn cap.
+    const call: ToolCall = {
+      id: "call-1",
+      name: "place_pixel",
+      arguments: { x: 3, y: 4, index: 2 },
+    };
+    const assistant: ChatMessage = {
+      role: "assistant",
+      content: "",
+      tool_calls: [call],
+    };
+    expect(assistant.tool_calls?.[0]).toEqual(call);
+    expect(Object.keys(assistant)).toContain("tool_calls");
+  });
+
+  it("a tool ChatMessage points back at the call it answers", () => {
+    const result: ChatMessage = {
+      role: "tool",
+      content: "out-of-bounds: (99,4) outside 16x16",
+      tool_call_id: "call-1",
+    };
+    expect(result.tool_call_id).toBe("call-1");
+  });
+
+  it("system and user messages need neither field", () => {
+    const msgs: ChatMessage[] = [
+      { role: "system", content: "/no_think you are a pixel artist" },
+      { role: "user", content: "fix the left ear" },
+    ];
+    expect(msgs.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(msgs[0].tool_calls).toBeUndefined();
+  });
+
+  it("a ChatTurn separates the model's prose from its calls", () => {
+    const turn: ChatTurn = {
+      content: "placing the pixel",
+      toolCalls: [{ id: "call-1", name: "done", arguments: { summary: "ok" } }],
+    };
+    expect(turn.toolCalls).toHaveLength(1);
+    expect(turn.content).toBe("placing the pixel");
+  });
+
+  it("a ChatTurn with no calls is representable — the zero-tool-call turn", () => {
+    // The most common qwen3 tool-loop behaviour, and the one §6.6 says must
+    // count against the cap.
+    const turn: ChatTurn = { content: "I think the ear looks fine.", toolCalls: [] };
+    expect(turn.toolCalls).toEqual([]);
+  });
+
+  it("a ToolDef is the function envelope Ollama marshals", () => {
+    const placePixel: ToolDef = {
+      type: "function",
+      function: {
+        name: "place_pixel",
+        description: "Write one pixel. index may be a palette index or '.' to clear.",
+        parameters: {
+          type: "object",
+          properties: {
+            x: { type: "integer" },
+            y: { type: "integer" },
+            index: { type: ["integer", "string"] },
+          },
+          required: ["x", "y", "index"],
+        },
+      },
+    };
+    expect(placePixel.type).toBe("function");
+    expect(placePixel.function.name).toBe("place_pixel");
+    expect(Object.keys(placePixel.function)).toEqual([
+      "name",
+      "description",
+      "parameters",
+    ]);
   });
 });
