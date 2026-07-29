@@ -106,7 +106,16 @@ export const PaletteRefSchema = z.object({
 const SpriteMetaSchema = z.object({
   generatorModel: z.string(),
   criticModel: z.string(),
-  round: z.int().nonnegative(),
+  /**
+   * 1-based — spec §7.5 pins the draft as round 1, so there is no round 0.
+   *
+   * `positive()`, not `nonnegative()`: the lenient bound let a 0-based pipeline
+   * write a whole session of documents the schema could not object to, and the
+   * off-by-one would first surface in the filmstrip labels and the bench CSV,
+   * a long way from its cause. `repairs` below stays `nonnegative()` — that one
+   * counts from zero, and zero is the good case.
+   */
+  round: z.int().positive(),
   repairs: z.int().nonnegative(),
   parentId: z.string().nullable(),
   /**
@@ -286,13 +295,27 @@ export const LintReportSchema = z.strictObject({
 // ---------------------------------------------------------------------------
 
 const ModelsSchema = z
-  .object({
+  .strictObject({
     generator: z.string().min(1).default("qwen3:8b"),
     critic: z.string().min(1).default("qwen3-vl:8b-instruct-q4_K_M"),
   })
   .default({ generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" });
 
-export const HarnessConfigSchema = z.object({
+/**
+ * **Strict.** §6.8 exists so two benchmark runs can be compared, and the config
+ * is serialized into every `SessionHistory` to make that possible. A lenient
+ * object silently drops a key it does not recognize and substitutes today's
+ * default in its place — so a history written when the field was `criticUpscale`
+ * re-parses claiming `criticTargetPx: 512`, a limit that run never used. That is
+ * exactly "a difference might come from the change under test or from a limit
+ * that was altered and forgotten," the sentence §6.8 uses to justify itself.
+ *
+ * Strictness rejects *unknown* keys, not absent ones: every field here has a
+ * default, so `parse({})` still yields `DEFAULT_HARNESS_CONFIG` and a partial
+ * override remains the normal way to call this. `models` is strict for the same
+ * reason one level down.
+ */
+export const HarnessConfigSchema = z.strictObject({
   /** Bounds the number of CRITIQUES — the draft is round 1 (spec §7.5). */
   maxRounds: z.int().positive().default(3),
   maxReviseTurns: z.int().positive().default(40),
@@ -391,8 +414,12 @@ export const RoundTimingsSchema = z.object({
 });
 
 export const RoundSchema = z.object({
-  /** 1-based; the draft is round 1 (spec §7.5). */
-  round: z.int().nonnegative(),
+  /**
+   * 1-based; the draft is round 1 (spec §7.5). `positive()` for the same reason
+   * `meta.round` is — round 0 is not a round, and `acceptedRound` names this
+   * number rather than an array index.
+   */
+  round: z.int().positive(),
   doc: SpriteDocSchema,
   /** Of THIS doc — the round is snapshotted at the top of the iteration (R2). */
   lint: LintReportSchema,
@@ -450,6 +477,17 @@ export const DraftFailureSchema = z.object({
 });
 
 export const SessionHistorySchema = z.object({
+  /**
+   * Staleness detection — spec §6.7, and the other half of the strict
+   * `HarnessConfigSchema` above.
+   *
+   * A pinned literal rather than a number: version 2 is a shape this parser has
+   * never seen, so accepting the field while ignoring its value would leave the
+   * artifact claiming a guarantee nothing checked. Together the two say *which
+   * shape a history was written against* and *fail loudly when it is not this
+   * one* — which is what `SessionHistory` otherwise had no signal for at all.
+   */
+  schemaVersion: z.literal(1),
   sessionId: z.string().min(1),
   /** Serialized on every run so two benchmark runs can be compared. */
   config: HarnessConfigSchema,
@@ -465,11 +503,36 @@ export const SessionHistorySchema = z.object({
   finalState: PipelineStateSchema,
   outcome: z.enum(["completed", "failed"]),
   /**
+   * Why a run failed, when the failure was not a draft rejection — spec §6.7.
+   *
+   * `draftFailures` covers draft rejection only. An `OllamaTimeoutError` during
+   * `CRITIQUING` is not a draft failure and nothing else could hold it, so a
+   * persisted history could not say why it failed — while §8 has the status bar
+   * read failure state off exactly that artifact.
+   *
+   * Required with a nullable value, not optional: an absent key and an explicit
+   * `null` would otherwise be the same artifact, and a writer that forgot the
+   * field would be indistinguishable from a run that succeeded. Deliberately
+   * *not* cross-refined against `outcome` — a draft-rejection failure leaves
+   * this `null` and reports itself through `draftFailures`, so tying the two
+   * together would collapse the two failure modes this field exists to separate.
+   */
+  error: z.string().nullable(),
+  /**
    * Which round the user accepted, `null` until the gate is answered. The
    * global constraint "any round may be accepted, not only the last" was
    * implemented by no wave and recorded in no field.
+   *
+   * **Stores `Round.round`, which is 1-based — not an array index** (spec
+   * §6.7). `Api.accept(roundIndex)` speaks the renderer's 0-based array
+   * position, so exactly one conversion stands between the two, and
+   * `accept(0)` — accepting the draft, the most common call there is — is
+   * where dropping it shows up. `positive()` rather than `nonnegative()` so
+   * the un-converted index cannot be persisted: a stored `0` names a round
+   * that §7.5 says does not exist, and nothing downstream could tell it apart
+   * from a deliberate value.
    */
-  acceptedRound: z.int().nonnegative().nullable(),
+  acceptedRound: z.int().positive().nullable(),
 });
 
 // ---------------------------------------------------------------------------

@@ -54,13 +54,21 @@ function validDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
     meta: {
       generatorModel: "qwen3:8b",
       criticModel: "qwen3-vl:8b-instruct-q4_K_M",
-      round: 0,
+      // 1, not 0: spec §7.5 pins the draft as round 1, so a doc carrying round
+      // 0 describes a round that cannot exist. The default fixture has to be a
+      // document production could actually emit, or every test that builds on it
+      // is asserting against an unreachable state.
+      round: 1,
       repairs: 0,
       parentId: null,
     },
     ...over,
   };
 }
+
+/** `validDoc` with only `meta` overridden — the rest of the doc left well-formed. */
+const docWithMeta = (metaOver: Record<string, unknown>) =>
+  validDoc({ meta: { ...(validDoc().meta as object), ...metaOver } });
 
 /** A blank doc at any of the three square sizes. */
 function squareDoc(n: 16 | 32 | 64, over: Record<string, unknown> = {}) {
@@ -129,6 +137,7 @@ function validRound(n = 1, over: Record<string, unknown> = {}) {
 
 function validHistory(over: Record<string, unknown> = {}) {
   return {
+    schemaVersion: 1,
     sessionId: "s-1",
     config: DEFAULT_HARNESS_CONFIG,
     rounds: [validRound(1)],
@@ -136,6 +145,7 @@ function validHistory(over: Record<string, unknown> = {}) {
     stopReason: "no-high-severity",
     finalState: "AWAITING_USER",
     outcome: "completed",
+    error: null,
     acceptedRound: null,
     ...over,
   };
@@ -253,6 +263,42 @@ describe("SpriteDocSchema", () => {
   it("defaults meta.repairedRows to an empty list", () => {
     const parsed: SpriteDoc = SpriteDocSchema.parse(validDoc());
     expect(parsed.meta.repairedRows).toEqual([]);
+  });
+
+  // -- meta.round is 1-based — spec §7.5 pins the draft as round 1 -----------
+  //
+  // `nonnegative()` admitted `round: 0`, so a 0-based pipeline would have
+  // written a whole session of docs the schema could not object to, and the
+  // off-by-one would only surface in the filmstrip labels and the bench CSV.
+
+  it("rejects meta.round = 0 — the draft is round 1, not round 0", () => {
+    const res = SpriteDocSchema.safeParse(docWithMeta({ round: 0 }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path.join(".") === "meta.round")).toBe(true);
+    }
+  });
+
+  it("accepts meta.round = 1 — the paired accept", () => {
+    // Proves the rejection above is about the value, not about the field being
+    // present at all.
+    const parsed = SpriteDocSchema.parse(docWithMeta({ round: 1 }));
+    expect(parsed.meta.round).toBe(1);
+  });
+
+  it("accepts a later meta.round", () => {
+    expect(SpriteDocSchema.parse(docWithMeta({ round: 7 })).meta.round).toBe(7);
+  });
+
+  it.each([-1, 1.5])("rejects meta.round = %s", (r) => {
+    expect(SpriteDocSchema.safeParse(docWithMeta({ round: r })).success).toBe(false);
+  });
+
+  it("still admits meta.repairs = 0 — repairs count from zero, rounds do not", () => {
+    // The two fields sit side by side and only one of them is 1-based. A blanket
+    // `positive()` across the meta block would make an unrepaired draft — the
+    // good case — unrepresentable.
+    expect(SpriteDocSchema.parse(docWithMeta({ repairs: 0 })).meta.repairs).toBe(0);
   });
 
   // -- spec §6.3 amendment A4: off-palette indices are unrepresentable -------
@@ -863,6 +909,85 @@ describe("HarnessConfigSchema", () => {
     const scaleFor = (w: number) => Math.max(1, Math.floor(criticTargetPx / w));
     expect([16, 32, 64].map((w) => scaleFor(w) * w)).toEqual([512, 512, 512]);
   });
+
+  // -- strict: an unknown key is a stale artifact, not a typo to ignore ------
+  //
+  // Spec §6.8 serializes the config into every `SessionHistory` so two
+  // benchmark runs can be compared. A lenient schema silently drops a key it
+  // does not recognize and substitutes today's default in its place — so a
+  // history written against `criticUpscale: 16` re-parses claiming
+  // `criticTargetPx: 512`, a limit that run never used. That is precisely "a
+  // difference might come from the change under test or from a limit that was
+  // altered and forgotten," the sentence §6.8 uses to justify its own
+  // existence. Strict parsing turns a stale artifact into a loud failure.
+
+  it("throws on criticUpscale: 16 rather than substituting criticTargetPx: 512", () => {
+    // The literal pre-amendment field name. This is the exact artifact the
+    // strictness exists to catch.
+    expect(() => HarnessConfigSchema.parse({ criticUpscale: 16 })).toThrow();
+  });
+
+  it("does not silently yield the default target for a criticUpscale config", () => {
+    const res = HarnessConfigSchema.safeParse({ criticUpscale: 16 });
+    expect(res.success).toBe(false);
+    // Belt and braces: the old failure mode was a *successful* parse whose
+    // `criticTargetPx` read 512, so assert the substitution never happens.
+    if (res.success) {
+      expect((res.data as { criticTargetPx: number }).criticTargetPx).toBeUndefined();
+    }
+  });
+
+  it("names the unrecognized key in the error", () => {
+    const res = HarnessConfigSchema.safeParse({ criticUpscale: 16 });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(JSON.stringify(res.error.issues)).toMatch(/criticUpscale/);
+    }
+  });
+
+  it.each(["maxTurns", "temperature", "criticUpscale", "schemaVersion"])(
+    "rejects the unknown key %s",
+    (k) => {
+      expect(HarnessConfigSchema.safeParse({ [k]: 1 }).success).toBe(false);
+    },
+  );
+
+  it("rejects an unknown key even alongside a full, valid config", () => {
+    expect(
+      HarnessConfigSchema.safeParse({ ...DEFAULT_HARNESS_CONFIG, criticUpscale: 16 })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects an unknown key inside models", () => {
+    // The same staleness argument, one level down: `models` is part of the
+    // config that gets serialized and compared.
+    expect(
+      HarnessConfigSchema.safeParse({
+        models: { generator: "qwen3:8b", critic: "qwen3-vl:8b", judge: "llama3" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("strictness rejects unknown keys, not absent ones", () => {
+    // The paired accept, and the thing strictness must not break: every field
+    // in §6.8 has a default, and a caller handing over `{}` — or any subset —
+    // is the normal case, not a stale artifact.
+    expect(HarnessConfigSchema.parse({})).toEqual(DEFAULT_HARNESS_CONFIG);
+    expect(HarnessConfigSchema.safeParse({ maxRounds: 7 }).success).toBe(true);
+    expect(HarnessConfigSchema.safeParse({ models: {} }).success).toBe(true);
+    expect(HarnessConfigSchema.safeParse({ models: { critic: "llava:13b" } }).success).toBe(
+      true,
+    );
+  });
+
+  it("accepts every §6.8 key by name, so strictness cannot orphan a real field", () => {
+    // A strict schema that also lost a legitimate key would reject valid
+    // configs, so each one is handed over on its own.
+    for (const [k, v] of Object.entries(DEFAULT_HARNESS_CONFIG)) {
+      expect(HarnessConfigSchema.safeParse({ [k]: v }).success).toBe(true);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -896,6 +1021,44 @@ describe("PixelDiffSchema", () => {
 describe("RoundSchema", () => {
   it("accepts a round with a null critique", () => {
     expect(RoundSchema.safeParse(validRound(1, { critique: null })).success).toBe(true);
+  });
+
+  // -- round is 1-based — spec §7.5 -----------------------------------------
+
+  it("rejects round: 0 — the draft is round 1", () => {
+    // The doc's own `meta.round` is left at 1, so the only thing this can fail
+    // on is the round's own number.
+    const res = RoundSchema.safeParse(validRound(1, { round: 0 }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path.join(".") === "round")).toBe(true);
+    }
+  });
+
+  it("accepts round: 1 — the paired accept", () => {
+    expect(RoundSchema.parse(validRound(1)).round).toBe(1);
+  });
+
+  it("rejects a negative round", () => {
+    expect(RoundSchema.safeParse(validRound(1, { round: -1 })).success).toBe(false);
+  });
+
+  it("rejects a fractional round", () => {
+    expect(RoundSchema.safeParse(validRound(1, { round: 1.5 })).success).toBe(false);
+  });
+
+  it("rejects a round whose nested doc claims round 0", () => {
+    // The round number and the doc's `meta.round` are two separate fields and a
+    // pipeline can get either one wrong on its own, so both are pinned.
+    const res = RoundSchema.safeParse(
+      validRound(1, { doc: docWithMeta({ round: 0 }) }),
+    );
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues.some((i) => i.path.join(".") === "doc.meta.round")).toBe(
+        true,
+      );
+    }
   });
 
   // -- diffFromPrev nullability — the sharpest edge in §6.7 ------------------
@@ -1227,15 +1390,131 @@ describe("SessionHistorySchema", () => {
     expect(SessionHistorySchema.parse(validHistory()).acceptedRound).toBeNull();
   });
 
-  it("rejects a negative acceptedRound", () => {
+  it.each([-1, 0])("rejects acceptedRound %s", (v) => {
+    // `0` is the case that matters, and it is not merely "a negative number
+    // one lower". §6.7 stores `Round.round`, which is 1-based — *not* the
+    // 0-based position `Api.accept(roundIndex)` speaks. `accept(0)` is
+    // accepting the draft, the most common call there is, and it is exactly
+    // where a dropped conversion produces a value a `nonnegative()` bound
+    // would have persisted without complaint.
+    expect(SessionHistorySchema.safeParse(validHistory({ acceptedRound: v })).success).toBe(
+      false,
+    );
+  });
+
+  it("accepts acceptedRound: 1 — the draft named by its round, not by its index", () => {
+    // The paired accept for the `0` rejection above: the draft is acceptable,
+    // it is just spelled `1`.
+    const parsed = SessionHistorySchema.parse(
+      validHistory({ acceptedRound: 1, finalState: "DONE" }),
+    );
+    expect(parsed.acceptedRound).toBe(1);
+  });
+
+  it("accepts acceptedRound: null — still the un-answered gate, not a rejection", () => {
+    // Pins that tightening the bound did not take the nullability with it.
+    expect(SessionHistorySchema.parse(validHistory({ acceptedRound: null })).acceptedRound).toBe(
+      null,
+    );
+  });
+
+  it("rejects a fractional acceptedRound", () => {
     expect(
-      SessionHistorySchema.safeParse(validHistory({ acceptedRound: -1 })).success,
+      SessionHistorySchema.safeParse(validHistory({ acceptedRound: 1.5 })).success,
     ).toBe(false);
   });
 
   it("rejects a history missing acceptedRound", () => {
     const { acceptedRound: _drop, ...rest } = validHistory();
     expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  // -- error: why a run failed, when it wasn't a draft (spec §6.7) ----------
+  //
+  // `draftFailures` covers draft rejection only. An `OllamaTimeoutError` during
+  // CRITIQUING is not a draft failure and nothing else could hold it, so a
+  // persisted history could not say why it failed — while §8 has the status bar
+  // read failure state off exactly that artifact.
+
+  it("records why a run failed when the failure was not a draft rejection", () => {
+    const parsed = SessionHistorySchema.parse(
+      validHistory({
+        outcome: "failed",
+        finalState: "FAILED",
+        stopReason: null,
+        error: "OllamaTimeoutError: /api/chat exceeded 480000ms during CRITIQUING",
+      }),
+    );
+    expect(parsed.error).toBe(
+      "OllamaTimeoutError: /api/chat exceeded 480000ms during CRITIQUING",
+    );
+    // And it is reachable without a single draft failure, which is the whole
+    // point: this failure mode has no `draftFailures` entry to hide behind.
+    expect(parsed.draftFailures).toEqual([]);
+  });
+
+  it("accepts error: null on a run that has not failed", () => {
+    expect(SessionHistorySchema.parse(validHistory()).error).toBeNull();
+  });
+
+  it("rejects a history missing error", () => {
+    // Required, not optional: an absent key and an explicit `null` would
+    // otherwise be the same artifact, and a writer that forgot the field would
+    // look exactly like a run that succeeded.
+    const { error: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  it("rejects error: undefined", () => {
+    expect(SessionHistorySchema.safeParse(validHistory({ error: undefined })).success).toBe(
+      false,
+    );
+  });
+
+  it.each([500, { code: "ETIMEDOUT" }, ["a", "b"]])("rejects a non-string error %s", (e) => {
+    expect(SessionHistorySchema.safeParse(validHistory({ error: e })).success).toBe(false);
+  });
+
+  it("accepts an empty-string error", () => {
+    // `.min(1)` would make a caller that has an exception with no message
+    // choose between lying and failing validation.
+    expect(SessionHistorySchema.parse(validHistory({ error: "" })).error).toBe("");
+  });
+
+  it("leaves error and draftFailures independent", () => {
+    // A draft rejection fills `draftFailures` and leaves `error` null; the
+    // schema must not cross-refine them, or the two failure modes collapse.
+    const draftOnly = SessionHistorySchema.parse(
+      validHistory({
+        rounds: [],
+        outcome: "failed",
+        finalState: "FAILED",
+        stopReason: null,
+        error: null,
+        draftFailures: [{ attempt: 1, raw: "prose", repairs: 256, reason: "unparseable" }],
+      }),
+    );
+    expect(draftOnly.error).toBeNull();
+    expect(draftOnly.draftFailures).toHaveLength(1);
+  });
+
+  // -- schemaVersion: the staleness signal (spec §6.7, §6.8) ----------------
+
+  it("pins schemaVersion to the literal 1", () => {
+    expect(SessionHistorySchema.parse(validHistory()).schemaVersion).toBe(1);
+  });
+
+  it("rejects a history missing schemaVersion", () => {
+    const { schemaVersion: _drop, ...rest } = validHistory();
+    expect(SessionHistorySchema.safeParse(rest).success).toBe(false);
+  });
+
+  it.each([0, 2, "1", null, true])("rejects schemaVersion %s", (v) => {
+    // A literal, not a number: version 2 is a shape this parser has never seen,
+    // so accepting the field while ignoring its value would defeat it entirely.
+    expect(SessionHistorySchema.safeParse(validHistory({ schemaVersion: v })).success).toBe(
+      false,
+    );
   });
 
   // -- the round trip -------------------------------------------------------
@@ -1246,6 +1525,7 @@ describe("SessionHistorySchema", () => {
     // warning with `indices`, a non-null `revise`, three non-null timings,
     // `userFeedback`, a populated `draftFailures`, and `acceptedRound`.
     const fully = {
+      schemaVersion: 1,
       sessionId: "s-full",
       config: { ...DEFAULT_HARNESS_CONFIG, maxRounds: 2, criticTargetPx: 256 },
       rounds: [
@@ -1334,6 +1614,11 @@ describe("SessionHistorySchema", () => {
       stopReason: "critic-failed",
       finalState: "AWAITING_USER",
       outcome: "completed",
+      // Non-null so the field cannot pass by being absent on both sides of the
+      // trip. The schema deliberately does not tie `error` to `outcome`: §6.7
+      // defines no cross-field rule, and a run whose critic timed out on round
+      // 2 can still be accepted at round 1.
+      error: "OllamaTimeoutError: /api/chat exceeded 480000ms during CRITIQUING",
       acceptedRound: 1,
     };
 
@@ -1356,6 +1641,15 @@ describe("SessionHistorySchema", () => {
     expect(parsed.stopReason).toBe("critic-failed");
     expect(parsed.acceptedRound).toBe(1);
     expect(parsed.config.criticTargetPx).toBe(256);
+    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.error).toBe(
+      "OllamaTimeoutError: /api/chat exceeded 480000ms during CRITIQUING",
+    );
+    // The two fields that only exist once they survive serialization: a
+    // staleness marker and a failure reason that a reload has to be able to
+    // read back off disk.
+    expect(JSON.parse(JSON.stringify(parsed)).schemaVersion).toBe(1);
+    expect(JSON.parse(JSON.stringify(parsed)).error).toMatch(/OllamaTimeoutError/);
   });
 });
 
