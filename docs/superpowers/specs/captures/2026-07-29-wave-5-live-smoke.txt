@@ -1,0 +1,102 @@
+Wave 5 live smoke — real Ollama, real qwen3:8b.
+Regenerate with: npm run test:live
+
+$ node -v
+v22.15.0
+
+$ curl -s http://127.0.0.1:11434/api/version
+{"version":"0.32.1"}
+
+$ npm run test:live
+
+> sprite-maker@0.1.0 test:live
+> LIVE=1 vitest run tests/live --reporter=verbose
+
+
+ RUN  v4.1.10 /Users/sogemman/dev/sprite-maker
+
+stdout | tests/live/smoke.test.ts > live Ollama smoke > lists the installed models
+
+--- listModels() ---
+[
+  "qwen3-vl:8b-instruct-q4_K_M",
+  "qwen3:8b-q4_K_M",
+  "qwen3:8b",
+  "qwen3:4b",
+  "deepseek-v3.1:671b-cloud",
+  "llama3.2:latest"
+]
+
+
+ ✓ tests/live/smoke.test.ts > live Ollama smoke > lists the installed models 22ms
+stdout | tests/live/smoke.test.ts > live Ollama smoke > returns a non-empty string from a real generator call
+
+--- generate() — qwen3:8b ---
+Hello
+
+
+ ✓ tests/live/smoke.test.ts > live Ollama smoke > returns a non-empty string from a real generator call 8940ms
+stdout | tests/live/smoke.test.ts > live Ollama smoke > round-trips a tool call through a real chat turn
+
+--- chatWithTools() turn 1 — ChatTurn ---
+{
+  "content": "",
+  "toolCalls": [
+    {
+      "id": "call_nfr06901",
+      "name": "place_pixel",
+      "arguments": {
+        "x": 3,
+        "y": 4,
+        "index": 2
+      }
+    }
+  ]
+}
+
+
+stdout | tests/live/smoke.test.ts > live Ollama smoke > round-trips a tool call through a real chat turn
+
+--- chatWithTools() turn 2 — ChatTurn ---
+{
+  "content": "The pixel at position (3,4) has been set to palette index 2.  \nDONE",
+  "toolCalls": []
+}
+
+
+--- transcript sent on turn 2 — ChatMessage[] ---
+[
+  {
+    "role": "user",
+    "content": "/no_think Place a pixel at x=3 y=4 with index 2, then reply DONE."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_nfr06901",
+        "name": "place_pixel",
+        "arguments": {
+          "x": 3,
+          "y": 4,
+          "index": 2
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "ok",
+    "tool_call_id": "call_nfr06901"
+  }
+]
+
+
+ ✓ tests/live/smoke.test.ts > live Ollama smoke > round-trips a tool call through a real chat turn 15561ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  14:16:34
+   Duration  24.67s (transform 44ms, setup 0ms, import 75ms, tests 24.52s, environment 0ms)
+

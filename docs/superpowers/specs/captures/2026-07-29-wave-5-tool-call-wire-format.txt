@@ -1,0 +1,73 @@
+### Ollama {"version":"0.32.1"}  —  probed 2026-07-29T18:07:34Z
+
+=== 1. RESPONSE SHAPE: how Ollama returns a tool call ===
+{
+  "role": "assistant",
+  "content": "",
+  "tool_calls": [
+    {
+      "id": "call_wzfoz3oa",
+      "function": {
+        "index": 0,
+        "name": "place_pixel",
+        "arguments": {
+          "x": 3,
+          "y": 4,
+          "index": 2
+        }
+      }
+    }
+  ]
+}
+
+  -> id is present; name/arguments are NESTED under `function`; arguments is an OBJECT, not a JSON string.
+
+=== 2. REQUEST SHAPE A — assistant turn marshalled as {id, function:{name, arguments}} ===
+{
+  "role": "assistant",
+  "content": "DONE."
+}
+
+  -> The model SEES the call it already made and moves on. This is the correct marshalling.
+
+=== 3. REQUEST SHAPE B — the mutant: assistant turn marshalled FLAT as {id, name, arguments} ===
+{
+  "role": "assistant",
+  "content": "",
+  "tool_calls": [
+    {
+      "id": "call_qv54snhe",
+      "function": {
+        "index": 0,
+        "name": "place_pixel",
+        "arguments": {
+          "y": 4,
+          "index": 2,
+          "x": 3
+        }
+      }
+    }
+  ]
+}
+
+  -> Ollama's Go decoder drops the unrecognised flat keys, the chat template renders no
+     tool_calls, and the model RE-ISSUES the call it already made. Spec 6.9 verbatim:
+     'the model re-issues calls it has already made, burning the turn cap.'
+
+=== 4. tool_call_id alone (no tool_name) is sufficient ===
+{
+  "role": "assistant",
+  "content": "DONE",
+  "thinking": "Okay, the user told me to place a pixel at x=3, y=4, index 2, and then say DONE. Let me check if I understood the instructions correctly.\n\nFirst, the function call. The available tool is place_pixel, which takes x, y, and index as parameters. The parameters are all integers. The user specified x=3, y=4, index=2. So I need to structure the JSON arguments properly. The order in the function definition is x, y, index, but the user mentioned index last. Wait, the function's parameters are listed as [x y index], so the order should be x, y, index. But in the user's request, they said index 2 after x and y. So the arguments should be x=3, y=4, index=2. That's correct.\n\nI made the tool call with those parameters. The response was \"ok\", which indicates the function executed successfully. Now, the user wants me to say DONE after that. Since the function call was successful, I should confirm the action and then respond with DONE. The user might be testing if I follow the exact steps: first perform the action, then output DONE. So I need to make sure I don't add any extra information and just state DONE after the tool call. Let me verify again: place the pixel, then say DONE. The response should be concise. Alright, I'll proceed to say DONE.\n"
+}
+
+=== 5. /api/generate separates thinking from response (Ollama 0.32) ===
+{
+  "response": "PONG",
+  "thinking": "Okay, the user wants me to reply with exactly \"PONG\". Let me make sure I don't add anything else. Just the word PONG in uppercase. I need to check if there are any hidden characters or extra spaces. Alright, that's straightforward. I'll send that response.\n",
+  "done_reason": "stop"
+}
+
+  -> `response` carries ONLY the answer; the reasoning trace lands in `thinking`.
+     Wave 6's parseDraft therefore never sees a <think> block. Returning `response`
+     (and never `thinking`) is the correct read.

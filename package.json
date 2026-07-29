@@ -11,6 +11,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:live": "LIVE=1 vitest run tests/live --reporter=verbose",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
