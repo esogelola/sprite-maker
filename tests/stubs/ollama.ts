@@ -23,6 +23,19 @@
  * criterion 5 names — would be checking the end state rather than what turn 3
  * actually sent. A loop that appended nothing until the last turn would pass.
  *
+ * This applies to **every** mutable thing that crosses the boundary, not only
+ * `messages`: `options` (a seeded bench bumps `seed` on one object between
+ * calls), `tools` (a pipeline may withhold `done` until turn 2), `images`, and
+ * the array `listModels` hands back (§9's pickers sort it). Each of those is
+ * pinned by a named test in `tests/main/ollama.test.ts`, and each of those tests
+ * exists because the recording surface is only worth what its oldest entry is
+ * still true about. Waves 6–9 are invited to extend this file — extend the tests
+ * with it.
+ *
+ * `tool_call_id` is the sharpest case and gets its own test: it is how a tool
+ * result names the call it answers, the whole subject of the wire-format
+ * capture, and it appears in no transcript any other test sends.
+ *
  * **3. The last entry is reused when a queue is exhausted.** This is what makes
  * "a script that never calls `done()`" a one-line fixture: Wave 8 scripts a
  * single tool-calling turn and the cap test runs it 40 times.
@@ -56,6 +69,13 @@ export interface RecordedCall {
   tools?: ToolDef[];
   options?: Record<string, unknown>;
   format?: string;
+  /**
+   * The A8 suppression flag, recorded because the plan pins both Wave 6's and
+   * Wave 8's assertion as "assert on the stub's recorded call, not on the prompt
+   * text" — the `/no_think` prefix those criteria used to name was measured
+   * inert, and a prompt-text assertion could not tell the difference.
+   */
+  think?: boolean;
 }
 
 /**
@@ -183,6 +203,7 @@ export function createStubClient(script: StubScript): StubClient {
     if (images !== undefined) call.images = [...images];
     if (req.options !== undefined) call.options = { ...req.options };
     if (req.format !== undefined) call.format = req.format;
+    if (req.think !== undefined) call.think = req.think;
     record(call);
   }
 
@@ -223,6 +244,7 @@ export function createStubClient(script: StubScript): StubClient {
         tools: [...req.tools],
       };
       if (req.options !== undefined) call.options = { ...req.options };
+      if (req.think !== undefined) call.think = req.think;
       record(call);
       return copyTurn(unwrap(chatQueue.next()));
     },

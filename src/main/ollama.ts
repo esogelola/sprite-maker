@@ -29,6 +29,26 @@
  * monologue and charge the repair budget for it. The upside: `parseDraft` never
  * has to strip a `<think>` block.
  *
+ * **4. `think` is a top-level request field, and only a top-level request
+ * field** — spec amendment A8, capture
+ * `captures/2026-07-29-wave-5-think-suppression.txt`. The corollary of fact 3 is
+ * that the reasoning tokens are still generated, still counted in `eval_count`
+ * and still paid for in wall clock; they simply land in a field nothing reads.
+ * Measured on `qwen3:8b` / Ollama 0.32.1 at temperature 0 over two prompts:
+ *
+ * | method | eval tokens | `thinking` chars |
+ * |---|---|---|
+ * | nothing | 157 / 372 | 667 / 1433 |
+ * | `/no_think` prompt prefix | 340 / 393 | 1527 / 1465 |
+ * | `options: { think: false }` | 372 | 1433 |
+ * | **top-level `think: false`** | **3 / 14** | **0 / 0** |
+ *
+ * The prefix is inert. The options-bag spelling is *worse than inert*: Ollama
+ * drops unknown keys inside `options` with no error, no warning and no
+ * rejection, so it type-checks against `Record<string, unknown>`, reads
+ * correctly in review, and does nothing — which is why `OllamaOptions` below
+ * makes it a compile error rather than a comment.
+ *
  * Timeouts are the caller's: §6.8 scales `callTimeoutMs` by canvas area, which
  * this module cannot compute, so it takes an `AbortSignal` and reports what
  * happened.
@@ -52,14 +72,36 @@ const MAX_ERROR_BODY = 400;
 // requests — spec §6.9
 // ---------------------------------------------------------------------------
 
+/**
+ * Ollama's own option bag — `temperature`, `seed`, `num_predict`, … — with one
+ * key spelled out so it cannot be used.
+ *
+ * `think` is not an option, and Ollama discards it here without complaint (fact
+ * 4 in the header). Nothing else in the type system would object: the bag is a
+ * `Record<string, unknown>`, so `{ temperature: 0, think: false }` compiles,
+ * reviews clean, and silently restores 1433 characters of reasoning per call.
+ * Declaring the key with a sentence for a type turns that into a compile error
+ * whose message *is* the correction. Arbitrary bags built elsewhere still assign
+ * — only a literal or a type that actually carries `think` is rejected.
+ */
+export type OllamaOptions = Record<string, unknown> & {
+  think?: "`think` is a top-level request field, not an `options` key — spec A8";
+};
+
 export interface GenerateRequest {
   model: string;
   system?: string;
   prompt: string;
-  /** Ollama's own option bag — `temperature`, `seed`, `num_predict`, … */
-  options?: Record<string, unknown>;
+  options?: OllamaOptions;
   /** `"json"` constrains the model to valid JSON. */
   format?: string;
+  /**
+   * Suppress (or demand) the model's reasoning channel — spec §6.9, A8.
+   *
+   * Omitted leaves the decision to Ollama and the model, which is what the
+   * critique stage wants; §7.4's draft and revise stages pass `false`.
+   */
+  think?: boolean;
   signal?: AbortSignal;
 }
 
@@ -72,7 +114,9 @@ export interface ChatWithToolsRequest {
   model: string;
   messages: ChatMessage[];
   tools: ToolDef[];
-  options?: Record<string, unknown>;
+  options?: OllamaOptions;
+  /** See `GenerateRequest.think`. This is the stage where it matters most. */
+  think?: boolean;
   signal?: AbortSignal;
 }
 
@@ -335,6 +379,11 @@ export function createOllamaClient(baseUrl: string = DEFAULT_OLLAMA_BASE_URL): O
     if (req.system !== undefined) body.system = req.system;
     if (req.options !== undefined) body.options = req.options;
     if (req.format !== undefined) body.format = req.format;
+    // Beside `options`, never inside it, and only when the caller asked. An
+    // omitted `think` has to leave the key off the wire entirely rather than
+    // default to `false`: Ollama's default is the model's default, and deciding
+    // it here would take §7.4's per-stage choice away from every caller.
+    if (req.think !== undefined) body.think = req.think;
     return body;
   }
 
@@ -379,6 +428,10 @@ export function createOllamaClient(baseUrl: string = DEFAULT_OLLAMA_BASE_URL): O
         stream: false,
       };
       if (req.options !== undefined) body.options = req.options;
+      // Top-level, as on `/api/generate` — the capture reproduced the same
+      // result on `/api/chat`, and this is the endpoint the 40-turn revise loop
+      // runs on.
+      if (req.think !== undefined) body.think = req.think;
 
       const payload = await post("/api/chat", body, req.model, req.signal);
       const message = payload.message;

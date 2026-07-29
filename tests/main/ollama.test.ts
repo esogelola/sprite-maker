@@ -310,6 +310,70 @@ describe("generate", () => {
     expect(body.format).toBe("json");
   });
 
+  it("sends think as a top-level field, never inside options — spec A8", async () => {
+    const fixture = await startServer(replyJson({ response: "rows" }));
+    await createOllamaClient(fixture.baseUrl).generate({
+      model: "qwen3:8b",
+      prompt: "p",
+      options: { temperature: 0, seed: 7 },
+      think: false,
+    });
+
+    const { body } = fixture.requests[0];
+    // The whole of amendment A8. `options: { think: false }` was measured against
+    // a live Ollama 0.32.1 and changed nothing — 372 eval tokens and 1433
+    // characters of `thinking`, byte-identical to sending no suppression at all,
+    // because Ollama drops unknown keys inside the options bag without an error,
+    // a warning or a rejection. Only the top-level field suppresses: 14 tokens
+    // and 0 characters. Both spellings type-check; only this assertion separates
+    // them. See captures/2026-07-29-wave-5-think-suppression.txt.
+    expect(body.think).toBe(false);
+    expect(body.options).toEqual({ temperature: 0, seed: 7 });
+    expect(Object.keys(body.options as Record<string, unknown>)).not.toContain("think");
+  });
+
+  it("sends think as a JSON boolean, not the string \"false\"", async () => {
+    const fixture = await startServer(replyJson({ response: "rows" }));
+    await createOllamaClient(fixture.baseUrl).generate({
+      model: "m",
+      prompt: "p",
+      think: false,
+    });
+
+    // `"think":"false"` is truthy on Ollama's side and would silently restore
+    // the reasoning trace the field exists to remove.
+    expect(fixture.requests[0].raw).toContain('"think":false');
+  });
+
+  it("sends think: true as a top-level boolean", async () => {
+    const fixture = await startServer(replyJson({ response: "rows" }));
+    await createOllamaClient(fixture.baseUrl).generate({
+      model: "m",
+      prompt: "p",
+      think: true,
+    });
+    // The flag is forwarded, not hard-coded: the critique stage has no reason to
+    // suppress, and a client that always sent `false` would take that choice
+    // away from spec §7.4.
+    expect(fixture.requests[0].body.think).toBe(true);
+  });
+
+  it("omits think entirely when the caller did not ask for it", async () => {
+    const fixture = await startServer(replyJson({ response: "rows" }));
+    await createOllamaClient(fixture.baseUrl).generate({
+      model: "m",
+      prompt: "p",
+      options: { temperature: 0 },
+    });
+
+    // Absent, not `undefined` and not a defaulted `false`. Ollama's own default
+    // is the model's default, and a client that decided it for every caller
+    // would make §7.4's per-stage choice unreachable.
+    const { body } = fixture.requests[0];
+    expect("think" in body).toBe(false);
+    expect(Object.keys(body).sort()).toEqual(["model", "options", "prompt", "stream"]);
+  });
+
   it("returns the response field verbatim", async () => {
     const fixture = await startServer(replyJson({ response: '{"rows":["....","...."]}' }));
     const text = await createOllamaClient(fixture.baseUrl).generate({ model: "m", prompt: "p" });
@@ -418,6 +482,30 @@ describe("vision", () => {
     expect(body.system).toBe("You review pixel art.");
   });
 
+  it("sends think as a top-level field, never inside options — spec A8", async () => {
+    const fixture = await startServer(replyJson({ response: "{}" }));
+    await createOllamaClient(fixture.baseUrl).vision({
+      model: "qwen3-vl:8b-instruct-q4_K_M",
+      prompt: "critique",
+      images: [IMAGE],
+      options: { temperature: 0, seed: 11 },
+      think: false,
+    });
+
+    const { body } = fixture.requests[0];
+    expect(body.think).toBe(false);
+    expect(Object.keys(body.options as Record<string, unknown>)).not.toContain("think");
+  });
+
+  it("omits think entirely when the caller did not ask for it", async () => {
+    const fixture = await startServer(replyJson({ response: "{}" }));
+    await createOllamaClient(fixture.baseUrl).vision({ model: "m", prompt: "p", images: [IMAGE] });
+
+    const { body } = fixture.requests[0];
+    expect("think" in body).toBe(false);
+    expect(Object.keys(body).sort()).toEqual(["images", "model", "prompt", "stream"]);
+  });
+
   it("always sends an images key, even for an empty list", async () => {
     const fixture = await startServer(replyJson({ response: "{}" }));
     await createOllamaClient(fixture.baseUrl).vision({ model: "m", prompt: "p", images: [] });
@@ -465,6 +553,50 @@ describe("chatWithTools", () => {
       options: { temperature: 0, seed: 3 },
     });
     expect(fixture.requests[0].body.options).toEqual({ temperature: 0, seed: 3 });
+  });
+
+  it("sends think as a top-level field, never inside options — spec A8", async () => {
+    const fixture = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(fixture.baseUrl).chatWithTools({
+      model: "m",
+      messages: [{ role: "user", content: "u" }],
+      tools: [],
+      options: { temperature: 0, seed: 3 },
+      think: false,
+    });
+
+    // This is the stage A8 was written for: §7.4's revise loop runs up to 40
+    // turns per round and up to 3 rounds, and every one of them was paying for a
+    // reasoning trace nothing reads. `options.think` would have looked right in
+    // review and changed nothing at all.
+    const { body } = fixture.requests[0];
+    expect(body.think).toBe(false);
+    expect(body.options).toEqual({ temperature: 0, seed: 3 });
+    expect(Object.keys(body.options as Record<string, unknown>)).not.toContain("think");
+  });
+
+  it("sends think: true as a top-level boolean", async () => {
+    const fixture = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(fixture.baseUrl).chatWithTools({
+      model: "m",
+      messages: [],
+      tools: [],
+      think: true,
+    });
+    expect(fixture.requests[0].body.think).toBe(true);
+  });
+
+  it("omits think entirely when the caller did not ask for it", async () => {
+    const fixture = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(fixture.baseUrl).chatWithTools({
+      model: "m",
+      messages: [{ role: "user", content: "u" }],
+      tools: [PLACE_PIXEL],
+    });
+
+    const { body } = fixture.requests[0];
+    expect("think" in body).toBe(false);
+    expect(Object.keys(body).sort()).toEqual(["messages", "model", "stream", "tools"]);
   });
 
   it("marshals an assistant turn's tool_calls into Ollama's nested envelope", async () => {
@@ -1033,6 +1165,35 @@ describe("createStubClient", () => {
     expect(Object.keys(stub.calls[0]).sort()).toEqual(["method", "model", "prompt"]);
   });
 
+  it("records think on every method — plan tasks 6.1 and 8.x assert on this", async () => {
+    // The plan pins the A8 assertion as "assert on the stub's recorded call, not
+    // on the prompt text" for both the draft and the revise stage. Without this
+    // field neither wave has anything to assert against.
+    const stub = createStubClient({
+      generate: ["ok"],
+      vision: ["{}"],
+      chatWithTools: [{ content: "", toolCalls: [] }],
+    });
+
+    await stub.generate({ model: "m", prompt: "p", think: false });
+    await stub.vision({ model: "m", prompt: "p", images: [], think: true });
+    await stub.chatWithTools({ model: "m", messages: [], tools: [], think: false });
+
+    expect(stub.calls.map((c) => c.think)).toEqual([false, true, false]);
+  });
+
+  it("leaves think absent when the caller did not send it", async () => {
+    const stub = createStubClient({ generate: ["ok"], chatWithTools: [{ content: "", toolCalls: [] }] });
+    await stub.generate({ model: "m", prompt: "p" });
+    await stub.chatWithTools({ model: "m", messages: [], tools: [] });
+
+    // `think: undefined` would satisfy `toBe(undefined)` in a wave's assertion
+    // just as well as a call that never carried the field — so the distinction
+    // has to be the key's presence.
+    expect("think" in stub.calls[0]).toBe(false);
+    expect("think" in stub.calls[1]).toBe(false);
+  });
+
   it("records the images and format Wave 7 inspects", async () => {
     const png = Buffer.from([0x89, 0x50]);
     const stub = createStubClient({ vision: ["{}"] });
@@ -1068,6 +1229,45 @@ describe("createStubClient", () => {
     expect(stub.calls[0].tools).toEqual([PLACE_PIXEL, DONE]);
   });
 
+  it("copies the tools array, so offering done later cannot rewrite turn 1", async () => {
+    // A revise pipeline that withholds `done` until the model has placed at
+    // least one pixel mutates one array between turns. Stored by reference,
+    // every recorded call would show the final tool set, and "turn 1 was not
+    // offered done" — the assertion such a pipeline exists to support — would
+    // pass for a pipeline that offered it from the start.
+    const stub = createStubClient({ chatWithTools: [{ content: "", toolCalls: [] }] });
+    const tools: ToolDef[] = [PLACE_PIXEL];
+
+    await stub.chatWithTools({ model: "m", messages: [], tools });
+    tools.push(DONE);
+    await stub.chatWithTools({ model: "m", messages: [], tools });
+
+    expect(stub.calls[0].tools).toEqual([PLACE_PIXEL]);
+    expect(stub.calls[1].tools).toEqual([PLACE_PIXEL, DONE]);
+  });
+
+  it("copies options, so a bench bumping the seed cannot rewrite earlier calls", async () => {
+    // Exactly how a seeded bench varies a run: one options object, `seed`
+    // incremented between calls. By reference, every recorded call reports the
+    // last seed, and a bench comparing two runs would be reading one number
+    // twice.
+    const stub = createStubClient({
+      generate: ["a"],
+      vision: ["{}"],
+      chatWithTools: [{ content: "", toolCalls: [] }],
+    });
+    const options: Record<string, unknown> = { temperature: 0, seed: 1 };
+
+    await stub.generate({ model: "m", prompt: "p", options });
+    options.seed = 2;
+    await stub.vision({ model: "m", prompt: "p", images: [], options });
+    options.seed = 3;
+    await stub.chatWithTools({ model: "m", messages: [], tools: [], options });
+    options.seed = 4;
+
+    expect(stub.calls.map((c) => c.options?.seed)).toEqual([1, 2, 3]);
+  });
+
   it("snapshots messages so a growing transcript does not rewrite earlier calls", async () => {
     // Wave 8 appends to one array across up to 40 turns. Storing the reference
     // would make every recorded call show the *final* transcript, and its
@@ -1089,6 +1289,37 @@ describe("createStubClient", () => {
     expect(stub.calls[1].messages).toHaveLength(2);
     expect(stub.calls[1].messages?.[1].tool_calls).toEqual([
       { id: "c1", name: "place_pixel", arguments: { x: 1 } },
+    ]);
+  });
+
+  it("preserves tool_call_id when it snapshots a transcript", async () => {
+    // The highest-severity gap in the recording surface. Wave 8 must assert that
+    // each tool result names the call it answers, and `tool_call_id` *is* that
+    // pairing — it is the entire subject of the wire-format finding in
+    // captures/2026-07-29-wave-5-tool-call-wire-format.txt. A stub that dropped
+    // it would make Wave 8's acceptance criterion unassertable while every
+    // existing snapshot test stayed green, because none of them sends a `tool`
+    // turn.
+    const stub = createStubClient({ chatWithTools: [{ content: "", toolCalls: [] }] });
+    const messages: ChatMessage[] = [
+      { role: "user", content: "fix row 4" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_1", name: "place_pixel", arguments: { x: 3, y: 4, index: 2 } }],
+      },
+      { role: "tool", content: "ok", tool_call_id: "call_1" },
+      { role: "tool", content: "ok", tool_call_id: "call_2" },
+    ];
+
+    await stub.chatWithTools({ model: "m", messages, tools: [] });
+
+    expect(stub.calls[0].messages).toEqual(messages);
+    expect(stub.calls[0].messages?.map((m) => m.tool_call_id)).toEqual([
+      undefined,
+      undefined,
+      "call_1",
+      "call_2",
     ]);
   });
 
@@ -1152,6 +1383,26 @@ describe("createStubClient", () => {
     const stub = createStubClient({ models: ["qwen3:8b", "qwen3-vl:8b-instruct-q4_K_M"] });
     expect(await stub.listModels()).toEqual(["qwen3:8b", "qwen3-vl:8b-instruct-q4_K_M"]);
     expect(stub.calls).toEqual([{ method: "listModels", model: "" }]);
+  });
+
+  it("returns a copy of the model list, so a picker sorting it cannot edit the script", async () => {
+    // §9's model pickers sort what `listModels` hands them. Returning the
+    // script's own array would let the first test that sorts leak its ordering
+    // into every later call in the same file — a failure that lands in whichever
+    // test happens to run second.
+    const models = ["qwen3:8b", "llava:7b", "qwen3-vl:8b-instruct-q4_K_M"];
+    const stub = createStubClient({ models });
+
+    const first = await stub.listModels();
+    first.sort();
+    first.push("ghost:7b");
+
+    expect(await stub.listModels()).toEqual([
+      "qwen3:8b",
+      "llava:7b",
+      "qwen3-vl:8b-instruct-q4_K_M",
+    ]);
+    expect(models).toEqual(["qwen3:8b", "llava:7b", "qwen3-vl:8b-instruct-q4_K_M"]);
   });
 
   it("returns an empty model list when the script does not name one", async () => {

@@ -415,9 +415,9 @@ interface ChatTurn { content: string; toolCalls: ToolCall[] }
 
 interface OllamaClient {
   listModels(): Promise<string[]>
-  generate(req: { model, system?, prompt, options?, format?, signal? }): Promise<string>
-  vision(req: { model, system?, prompt, images: Buffer[], options?, format?, signal? }): Promise<string>
-  chatWithTools(req: { model, messages, tools, options?, signal? }): Promise<ChatTurn>
+  generate(req: { model, system?, prompt, options?, format?, think?, signal? }): Promise<string>
+  vision(req: { model, system?, prompt, images: Buffer[], options?, format?, think?, signal? }): Promise<string>
+  chatWithTools(req: { model, messages, tools, options?, think?, signal? }): Promise<ChatTurn>
 }
 ```
 
