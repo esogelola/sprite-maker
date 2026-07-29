@@ -97,12 +97,12 @@ The harness lives in `main/` for a reason beyond CORS avoidance: **it makes the 
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `shared/schema.ts` | Zod schemas: `SpriteDoc`, `CritiqueReport`, `LintReport`, `HarnessConfig`. Single source of truth for every contract. | — |
+| `shared/schema.ts` | Zod schemas: `SpriteDoc`, `CritiqueReport`, `LintReport`, `HarnessConfig`, `Round`, `SessionHistory`. Also `PipelineState`, `StopReason` and `PipelineEvent` — these are consumed by preload and renderer, and a value import of `main/pipeline` from the renderer bundle would pull `node:http` in behind it. Single source of truth for every contract. | — |
 | `shared/palettes.ts` | Curated palette library. Pure data. | — |
 | `shared/grid.ts` | Pure grid math: parse/serialize rows, `setPixel`, bounds checks, diff two grids. No I/O. | schema |
 | `main/ollama.ts` | Thin Ollama client: `generate`, `chatWithTools`, `vision`. The only place HTTP happens. | — |
 | `main/models.ts` | Model registry — enumerates installed models via `/api/tags`, binds roles. Backs the pickers. | ollama |
-| `main/render.ts` | Grid → PNG buffer. Nearest-neighbour upscale, optional coordinate overlay. Serves both critique and export. | grid |
+| `main/render.ts` | Grid → PNG buffer. Nearest-neighbour upscale only. Serves both critique and export. | grid |
 | `main/lint.ts` | Deterministic checks → `LintReport`. Zero inference. | grid, schema |
 | `main/draft.ts` | Build draft prompt → generator → parse and repair rows → `SpriteDoc`. | ollama, grid |
 | `main/critique.ts` | Build vision prompt (image + grid text) → critic → validated `CritiqueReport`. | ollama, render |
@@ -119,11 +119,11 @@ Two boundaries carry the most weight:
 
 ## 6. Data model and contracts
 
+> **v2 — 2026-07-29.** Sections 6–9 were rewritten after a three-part consistency audit found 18 blockers, 46 defects and 21 friction items across Waves 3–14. See `2026-07-29-consistency-audit-findings.md` for the full ledger and the four human rulings (R1–R4) that shaped this revision. Amendments A1–A5 from the v1 text are folded in rather than appended.
+
 ### 6.1 Row encoding
 
 One character per pixel: `.` = transparent, `0`–`f` = palette index 0–15.
-
-**Lowercase only.** `A`–`F` are rejected, not folded. Admitting both cases would give one pixel two spellings, which silently breaks row equality, `diff`, the empty-diff stop condition, and §10's golden-file byte comparison — four failures whose common cause would be invisible at each site.
 
 ```
 "................"
@@ -132,11 +132,13 @@ One character per pixel: `.` = transparent, `0`–`f` = palette index 0–15.
 "...01122222110.."
 ```
 
-The single-hex-character encoding caps the palette at **16 opaque colors plus transparent**. This is not a limitation to be worked around — it is the constraint that makes output look like pixel art rather than a downsampled photo. It also makes a row's character count equal its pixel count, so length validation is trivial, and `.` reads as visually empty in raw model output and in logs.
+**Lowercase only.** `A`–`F` are rejected, not folded. Admitting both cases would give one pixel two spellings, which silently breaks row equality, `diff`, the empty-diff stop condition, and §10's golden-file byte comparison — four failures whose common cause would be invisible at each site.
+
+The single-hex-character encoding caps the palette at **16 opaque colors plus transparent**. This is not a limitation to work around — it is the constraint that makes output look like pixel art rather than a downsampled photo.
 
 ### 6.1a Palette library
 
-Each palette carries **4 to 16 entries** — 16 is the ceiling imposed by the encoding, not a requirement. Bundled set:
+Each palette carries **4 to 16 entries** — 16 is the ceiling imposed by the encoding, not a requirement.
 
 | id | Entries | Note |
 |---|---|---|
@@ -146,43 +148,47 @@ Each palette carries **4 to 16 entries** — 16 is the ceiling imposed by the en
 | `nes-16` | 16 | Curated 16-color subset of the 54-color NES master palette |
 | `gameboy` | 4 | Original DMG green ramp |
 
-A palette with fewer than 16 entries makes indices beyond its length invalid. Those are caught in three distinct places, and the distinction matters — see amendment A4 in §6.3: `setPixel`/`fillRow` **throw** on the mutation path, `normalize` **repairs** on the draft path, and `SpriteDocSchema` **refuses** on the parse path.
+Palettes are **frozen singletons** — objects, colour arrays and the registry itself. They are handed to the agent, the linter, the renderer and the UI, and a mutation anywhere would corrupt every consumer.
+
+Indices beyond a palette's length are caught in three distinct places, and the distinction matters (§6.3): `setPixel`/`fillRow` **throw** on the mutation path, `normalize` **repairs** on the draft path, and `SpriteDocSchema` **refuses** on the parse path.
 
 ### 6.2 `SpriteDoc`
 
 ```ts
 {
   schemaVersion: 1,
-  id: string,                    // uuid
-  createdAt: string,             // ISO 8601
-  prompt: string,                // raw user request
+  id: string,                    // uuid by convention; not format-validated
+  createdAt: string,             // ISO 8601, validated
+  prompt: string,
   intent: {
-    subject: string,             // "red fox, sitting"
-    style?: string,              // "16-bit RPG"
+    subject: string,
+    style?: string,
     facing?: "front" | "side" | "three-quarter",
     notes?: string
   },
-  size: { w: 16|32|64, h: 16|32|64 },
-  palette: { id: string, colors: string[] },   // hex, index 0..15
+  size: { w: 16|32|64, h: 16|32|64 },   // square only — see below
+  palette: { id: string, colors: string[] },
   rows: string[],                // exactly h strings of exactly w chars
   meta: {
     generatorModel: string,
     criticModel: string,
     round: number,
     repairs: number,
-    repairedRows: number[],        // amendment A1 — see below
+    repairedRows: number[],
     parentId: string | null
   }
 }
 ```
 
-`id` is a UUID by convention and is **not** format-validated: hand-built test fixtures need to carry readable ids, and enforcing the format buys no safety. `createdAt` *is* validated as ISO 8601.
+**`size` is square.** `SizeSchema` is a union of the three square literals, not two independent unions — `{ w: 16, h: 64 }` must not parse. The v1 shape admitted nine sizes while every consumer assumed three.
 
-**Amendment A1 — `meta.repairedRows`.** The original §6.2 omitted this field. It is required: §6.5's `row-repaired` warning is defined per repaired row, and which rows were repaired is knowable only at parse time — it is unrecoverable from the finished grid, because a repaired row is indistinguishable from a row the model got right. The field carries a `[]` default, so a document written to the original §6.2 shape still parses.
+**Who owns `meta`.** The pipeline (§7.5), and nobody else. `revise()` returns a `Grid`, not a `SpriteDoc`, precisely so that no stage can produce a document with inherited identity. A derived document gets a fresh `id` and `createdAt`, `parentId` set to the document it derives from, `round` set by the pipeline, and **`repairs: 0` with `repairedRows: []`** — those describe what the *generator* did at draft time and are false about any later round.
+
+**`repairedRows`** is required because §6.5's `row-repaired` warning is defined per repaired row, and which rows were repaired is knowable only at parse time: once the grid exists, a repaired row is indistinguishable from one the model got right.
 
 ### 6.3 Row repair
 
-`qwen3:8b` emits rows of the wrong length routinely, not occasionally — especially at 64×64. This is treated as expected input:
+`qwen3:8b` emits malformed rows routinely, not occasionally — especially at 64×64. This is expected input, not an error:
 
 | Defect | Repair |
 |---|---|
@@ -190,26 +196,25 @@ A palette with fewer than 16 entries makes indices beyond its length invalid. Th
 | Row too long | Truncate |
 | Too few / too many rows | Pad with empty rows / truncate |
 | Invalid character | Map to `.` |
-| **Index at or beyond the palette length** | **Map to `.` — amendment A4** |
+| Index at or beyond the palette length | Map to `.` |
+| No parseable output at all | Treat as `rows: []`, which the above charges as `w × h` repairs |
 
-Every repair increments `meta.repairs`, which is the honest quality signal for the draft. If repairs exceed `repairRejectThreshold` (default 20% of cells), the draft is rejected and retried once with the specific misalignment described back to the model. A sprite needing 300 repairs is noise; accepting it silently would make the critic chase problems the generator caused.
+Every repair increments `meta.repairs` and adds its row to `meta.repairedRows`.
 
-**Amendment A4 — off-palette indices.** The original spec claimed in §6.1a that `shared/grid.ts` "rejects [off-palette indices] like any other off-palette index." That was false, and the gap was reachable on the very first small-palette generation: `normalize` took no palette size, so a 4-colour `gameboy` draft containing `f` survived repair, then passed `SpriteDocSchema` — whose row pattern permits all of `0`–`f` regardless of palette — and reached the renderer, where `palette.colors[15]` evaluates to `undefined`. `setPixel` did guard this, but it guards the *mutation* path, not the *parse* path, and a draft never touches `setPixel`.
+**The threshold is an unbounded ratio.** Reject when `repairs / (w × h) > repairRejectThreshold`. `repairs` is **not** a percentage and is not bounded by 1.0: a model returning 100 rows for a 16×16 canvas charges `(100 − 16) × 16 = 1344` against 256 cells — 525% — even when all 16 surviving rows are pristine. The rejection is correct there; the arithmetic must not assume a ratio ≤ 1.
 
-Caught in two places, because repair and validity are different jobs:
+On rejection the draft is retried once, with the specific defects named back to the model. **The retry prompt distinguishes defect kinds** — "row 4 used index 9 but this palette has 4 colours" is a different instruction from "row 4 was 12 characters, expected 16", and `repairedRows` alone cannot tell the model which mistake it made.
 
-1. **`normalize` takes `paletteSize`** and maps out-of-range indices to `.`, charging a repair. A generator that reaches past a 4-colour ramp is being sloppy in exactly the way the other repair rules already forgive, and forgiving it costs a character rather than a 30-second regeneration.
-2. **`SpriteDocSchema` gains a cross-field refinement** requiring every row character to index within `palette.colors.length`. This makes an off-palette `SpriteDoc` unrepresentable — including one loaded from disk, which no amount of care inside `normalize` would cover.
-
-**Amendment A5 — `repairs` is not a percentage.** `repairRejectThreshold` is described above as "20% of cells", but `meta.repairs` is unbounded relative to the cell count: a model returning 100 rows for a 16×16 canvas charges `(100 − 16) × 16 = 1344` repairs against 256 cells — 525% — even when all 16 surviving rows are pristine. The rejection is still correct (the model misunderstood the canvas shape), but implementations must compute `repairs / (w × h) > threshold` and must **not** assume the ratio is bounded by 1.0.
+A second rejection produces `DraftRejectedError`, whose raw output is preserved in `SessionHistory.draftFailures` (§6.7).
 
 ### 6.4 `CritiqueReport`
 
 ```ts
 {
-  readsAs: string,               // "a red fox, though the ears are ambiguous"
+  readsAs: string | null,        // null when degraded
   matchesIntent: boolean,
-  overall: 1|2|3|4|5,
+  overall: 1|2|3|4|5|null,       // null when degraded — never invented
+  degraded: boolean,             // true when the critic could not be parsed
   issues: [{
     id: string,
     region: [x0, y0, x1, y1],
@@ -222,12 +227,25 @@ Caught in two places, because repair and validity are different jobs:
 }
 ```
 
-The two confidence fields are deliberately separate. The valuable cell is high `confidence` with low `suggestConfidence`: *something is definitely wrong here, but my proposed fix is a guess — solve it yourself.* Collapsing them into a single number destroys exactly that signal.
+The two confidence fields are deliberately separate. The valuable cell is high `confidence` with low `suggestConfidence`: *something is definitely wrong here, but my proposed fix is a guess — solve it yourself.* Collapsing them into one number destroys exactly that signal.
 
-- Issues below `confidenceFloor` are dropped before the revise stage sees them, so the agent does not spend turns on the critic's hallucinations.
-- Issues above `confidenceFloor` but below `suggestConfidenceFloor` are passed **without** their `suggest` text, leaving the fix to the agent's judgement.
+**Filtering** (`filterIssues`) drops issues below `confidenceFloor` entirely, and blanks `suggest` on issues above it but below `suggestConfidenceFloor`. `suggest` is advisory by design; if it were authoritative we would be building a deterministic orchestrator, not an agentic revise stage.
 
-`suggest` is advisory by design. If it were authoritative we would be building a fully deterministic orchestrator, not an agentic revision stage.
+**Critique repairs, mirroring §6.3.** The draft path has a whole repair table for model sloppiness; the critique path had only reject-and-reprompt-once, so a critic emitting perfectly good issues while omitting `id` failed the entire report twice and became a permanent silent no-op. Before validation:
+
+| Defect | Repair |
+|---|---|
+| Missing `id` | Synthesize from the issue's index |
+| Missing `suggest` | `""`, with `suggestConfidence: 0` |
+| Missing `matchesIntent` | `true` |
+| Region partly out of canvas | Clamp to canvas bounds |
+| Region reversed (`x0 > x1`) | Normalize |
+| Region entirely outside | Drop the issue |
+| Missing `region` or `confidence` | Drop the issue |
+
+**Clamping happens on the raw JSON, before schema validation.** `Coord` is non-negative, so a region like `[-5, -5, 3, 3]` — the most common VLM error — would otherwise fail the schema, consume the single reprompt, and degrade the whole report.
+
+Only genuinely unparseable output triggers a reprompt. A second failure yields `{ degraded: true, overall: null, readsAs: null, issues: [] }`. **The degraded flag is not cosmetic:** without it the pipeline reports `no-high-severity` and tells the user the sprite passed a critique that never ran, and an invented `overall` pollutes every bench-derived quality metric.
 
 ### 6.5 `LintReport`
 
@@ -235,136 +253,251 @@ Pure functions over the grid, zero inference:
 
 ```ts
 {
-  errors: LintWarning[],         // schema violations — block the round; see A2
   warnings: [{
     code: "orphan-pixel" | "unused-palette-entry" | "low-contrast"
         | "outline-gap" | "row-repaired",
     cells: [[x, y], ...],
+    indices?: number[],          // which palette index/pair this concerns
     message: string
   }],
   metrics: {
     coverage: number,            // fraction non-transparent
     paletteUsed: number,
     orphanCount: number,
-    symmetryScore: number        // 0..1 horizontal mirror similarity
+    symmetryScore: number        // 0..1
   }
 }
 ```
 
-This is where per-cell scoring actually lives — relocated from the VLM to where it is computable. Each code has one definition, and the implementation may not invent others:
+**There is no `errors` field, and no `LINTING → FAILED` edge** (ruling R3). `lint()` receives an already-validated `SpriteDoc`; amendment A4 made every structural violation `errors` could have described unrepresentable before `lint()` is called. A dead branch that Wave 9 must implement and cannot test is worse than no branch.
 
-| Code | Definition |
-|---|---|
-| `orphan-pixel` | A **non-transparent** cell whose four orthogonal neighbours are all transparent. Diagonal-only attachment still counts as orphaned; that is the shape that reads as noise at sprite scale. |
-| `outline-gap` | A transparent cell with non-transparent cells on **opposite** orthogonal sides (left and right, or above and below). Detects a hole through which fill leaks into the background. |
-| `low-contrast` | Two palette indices used as orthogonal neighbours somewhere in the sprite whose relative luminance differs by less than 0.08. Reported once per index pair, not per cell. |
-| `unused-palette-entry` | A palette index that never appears in `rows`. Informational — it lowers `paletteUsed`, and a sprite using 3 of 16 entries is usually flat. |
-| `row-repaired` | Emitted once per row that section 6.3 had to repair, carrying that row's cells. Surfaces generator failure rather than sprite failure. |
+`indices` exists so consumers do not have to regex free text to learn which palette entry a warning concerns.
 
-`symmetryScore` is the fraction of non-transparent cells whose mirror about the **vertical centre axis** holds the same index. It is a reported metric, never an error — plenty of good sprites are deliberately asymmetric.
+Each code has one definition and one cardinality. The implementation may not invent others:
 
-**Amendment A2 — `errors` element shape.** The original §6.5 wrote `errors: [...]` without defining an element, leaving each implementer to invent one. `errors` and `warnings` now share the `LintWarning` shape — `{ code, cells, message }` — and differ only in which list they land in. One type, one renderer, and an error can point at offending cells exactly as a warning does.
+| Code | Definition | Cardinality | `cells` | `indices` |
+|---|---|---|---|---|
+| `orphan-pixel` | A **non-transparent** cell whose four orthogonal neighbours are all transparent. Out-of-canvas counts as transparent. Diagonal attachment does not rescue it | One warning total | Every orphan cell | — |
+| `outline-gap` | A transparent cell with non-transparent cells on **opposite** orthogonal sides (left and right, or above and below) | One warning total | Every gap cell | — |
+| `low-contrast` | Two **distinct** palette indices (`i < j`) used as orthogonal neighbours whose WCAG relative luminance differs by `< 0.08`. Transparent cells participate in no pair | One warning **per index pair** | Every cell of either index orthogonally adjacent to the other | `[i, j]` |
+| `unused-palette-entry` | A palette index never appearing in `rows` | One warning **per unused index** | `[]` | `[i]` |
+| `row-repaired` | One per row in `meta.repairedRows` | One warning **per row** | That row's cells | — |
+
+The `i < j` and transparent-exclusion clauses are load-bearing: `i === j` has Δluminance 0, so without them every filled sprite reports low-contrast against itself, and `charIndex('.')` is `-1`, so `colors[-1]` is `undefined` and the luminance parser crashes on the first sprite with a transparent neighbour — that is, all of them.
+
+Relative luminance uses the standard sRGB formula: linearize each channel (`c <= 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4`), then `0.2126R + 0.7152G + 0.0722B`. **Do not reimplement it with rounding.** `gameboy` indices 2 and 3 sit at Δ = 0.0794 against the 0.08 threshold — a 0.8% margin, and the canary for any change to this formula.
+
+`symmetryScore` is the fraction of non-transparent cells whose mirror about the **vertical centre axis** holds the same index. **A sprite with no non-transparent cells scores 1** — a blank canvas is trivially symmetric. Without this, an all-transparent sprite yields `0/0 = NaN`, which fails the schema bounds and serializes to `null`, surfacing as an opaque round-trip failure two stages from its cause. It is reachable: a model returning 16 rows of dots gets there with `repairs === 0`.
+
+`symmetryScore` is reported, never a warning — plenty of good sprites are deliberately asymmetric.
 
 ### 6.6 Revise-stage tools
 
 ```ts
-place_pixel(x: number, y: number, index: number | ".")   // "." clears to transparent
-fill_row(y: number, x0: number, x1: number, index)        // cheap horizontal runs
-done(summary: string)                                     // agent signals completion
+place_pixel(x: number, y: number, index: number | ".")   // "." clears
+fill_row(y: number, x0: number, x1: number, index)        // x1 inclusive
+done(summary: string)
 ```
 
-Capped at `maxReviseTurns`. Every call routes through `shared/grid.ts`. A rejected call returns an error string to the agent rather than throwing, so the agent can correct itself; the attempt still counts against the cap.
+Capped at `maxReviseTurns`. Every call routes through `shared/grid.ts`. A rejected call returns an error **string** to the agent rather than throwing, so it can correct itself; the attempt still counts against the cap.
 
-### 6.7 `SessionHistory`
+**Numeric strings are coerced before validation.** A model routinely emits JSON `"3"` where the contract says `3`; uncoerced, that is a technically-correct rejection of well-formed intent, and it burns turns.
+
+**A turn with zero tool calls counts against the cap** and injects a `user` nudge naming the three tools. This is the most common qwen3 tool-loop behavior, and it was previously undefined: counting only tool-firing turns spins forever on an identical message array, while exiting silently means the cap is not honoured.
+
+**The revise stage binds to `models.generator`.** `HarnessConfig.models` has two roles and three stages consume models; this pins the third. Its system prompt carries `/no_think` — 40 turns each emitting a reasoning block is the single largest latency risk in the design.
+
+`revise()` returns a `Grid` plus `{ turns, hitCap, summary }`. It does **not** return a `SpriteDoc` — see §6.2 on `meta` ownership.
+
+### 6.7 `SessionHistory` and `Round`
 
 ```ts
-{
+Round {
+  round: number,                       // 1-based; the draft is round 1
+  doc: SpriteDoc,
+  lint: LintReport,                    // of THIS doc
+  critique: CritiqueReport | null,     // raw, unfiltered — of THIS doc
+  filteredIssues: Issue[],             // what the revise stage actually received
+  diffFromPrev: PixelDiff[] | null,    // null on the first round
+  userFeedback: string | null,
+  revise: { turns: number, hitCap: boolean, summary: string } | null,
+  timings: { draftMs: number|null, critiqueMs: number|null, reviseMs: number|null }
+}
+
+SessionHistory {
   sessionId: string,
-  config: HarnessConfig,         // serialized on every run — see 6.8
-  rounds: [{
-    round: number,
-    doc: SpriteDoc,
-    critique: CritiqueReport | null,
-    lint: LintReport,
-    diffFromPrev: [{ x, y, from, to }]
-  }]
+  config: HarnessConfig,               // serialized on every run
+  rounds: Round[],
+  draftFailures: { attempt: number, raw: string, repairs: number, reason: string }[],
+  stopReason: StopReason | null,
+  finalState: PipelineState,
+  outcome: "completed" | "failed",
+  acceptedRound: number | null
 }
 ```
 
-Persisted as JSON alongside the sprite. This satisfies the version-control requirement, backs the round filmstrip in the UI, and gives the stop condition its cheapest signal: an empty `diffFromPrev` means the revise stage ran and changed nothing.
+Several of these fields exist because their absence was a defect:
+
+- **`critique` is raw and `filteredIssues` is separate.** Storing only the filtered report destroys the data needed to tune `confidenceFloor` — and §12 says those floors are first guesses to be tuned by the bench. Storing only the raw report shows the UI `suggest` text the agent never received, and the renderer cannot filter for itself because `filterIssues` lives in main. Both.
+- **`diffFromPrev` is nullable**, `null` on the first round. Non-nullable made "first round" and "revise changed nothing" the same value, and §6.7's v1 prose pointed the stop condition straight at the stored field — so a literal implementation stopped every run after the draft with a bogus `empty-diff`.
+- **`diffFromPrev` is computed against the round's `parent`, not the array-previous.** `applyFeedback(roundIndex)` may branch from any round; diffing against the last array element compares the wrong baseline.
+- **`userFeedback`** — §1 claims every revision round is preserved and comparable, but the user's own words lived only in a transient `Issue[]`. The session JSON could not answer "what did the user ask for at round 2?"
+- **`revise.turns` / `hitCap` / `summary`** — `hitCap` was dead as specified, since §9 made both outcomes behaviourally identical. But "did the agent exhaust its turns" is exactly what the bench exists to surface, and `summary` is the agent's own account of what it did, the most legible per-round artifact in the system.
+- **`timings`** — the prototype renders elapsed time and the bench CSV requires four timing columns; nothing recorded any.
+- **`draftFailures`** — a rejected draft has no valid `SpriteDoc`, so it cannot be a `Round`. It also happens *before* round 1 exists, so calling it a round would be a lie the schema then has to accommodate everywhere.
+- **`stopReason` / `finalState` / `outcome`** — `StopReason` existed only on a transient event, so the status bar lost it on reload, the bench could not fill its own CSV column, and there was no representable value for a failed run at all.
+- **`acceptedRound`** — the global constraint "any round may be accepted, not only the last" was implemented by no wave and recorded in no field.
+
+The history is persisted after every round via a `persist` callback on `PipelineDeps` — a callback rather than a path, so `pipeline.ts` stays Electron-free and the stub-driven tests stay disk-free.
 
 ### 6.8 `HarnessConfig`
 
 ```ts
 {
-  maxRounds:              number   // default 3
+  maxRounds:              number   // default 3 — bounds the number of CRITIQUES
   maxReviseTurns:         number   // default 40
   maxDraftRetries:        number   // default 1
   repairRejectThreshold:  number   // default 0.20
   confidenceFloor:        number   // default 0.30
   suggestConfidenceFloor: number   // default 0.50
   stopOnNoHighSeverity:   boolean  // default true
-  criticUpscale:          number   // default 16 → 32×32 renders to 512×512
-  callTimeoutMs:          number   // default 120000
+  criticTargetPx:         number   // default 512 — target, not multiplier
+  callTimeoutMs:          number   // default 120000, scaled by canvas area
   models: { generator: string, critic: string }
 }
 ```
 
-**The config is serialized into `SessionHistory` on every run.** Without that, two benchmark runs cannot be compared — a difference in output might come from the change under test or from a limit that was altered and forgotten.
+**`criticTargetPx` replaces `criticUpscale`.** §4.4 asks for an upscale to *approximately 512px*; a fixed multiplier of 16 gives 16×16 → 256px and 64×64 → **1024px**, the latter downsampled back by the vision encoder at several times the image-token cost. Compute `scale = max(1, floor(criticTargetPx / size.w))`.
+
+**`callTimeoutMs` scales with canvas area.** The effective timeout is `callTimeoutMs × (w × h) / (32 × 32)`. A 64×64 draft is 4,096 grid characters plus intent JSON at the measured 28.4 tok/s — comfortably into three digits of seconds, so a flat 120s would abort legitimate drafts.
+
+**`run()` re-parses its config on entry.** The schema's guards are worthless if a caller can hand-build `{...DEFAULT_HARNESS_CONFIG, maxRounds: 0}` and bypass them.
+
+The config is serialized into `SessionHistory` on every run. Without that, two benchmark runs cannot be compared — a difference might come from the change under test or from a limit that was altered and forgotten.
+
+### 6.9 Ollama client contract
+
+```ts
+interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool"
+  content: string
+  tool_calls?: ToolCall[]        // assistant side
+  tool_call_id?: string          // tool side
+}
+interface ToolCall { id: string; name: string; arguments: Record<string, unknown> }
+interface ChatTurn { content: string; toolCalls: ToolCall[] }
+
+interface OllamaClient {
+  listModels(): Promise<string[]>
+  generate(req: { model, system?, prompt, options?, format?, signal? }): Promise<string>
+  vision(req: { model, system?, prompt, images: Buffer[], options?, format?, signal? }): Promise<string>
+  chatWithTools(req: { model, messages, tools, options?, signal? }): Promise<ChatTurn>
+}
+```
+
+**`ChatMessage.tool_calls` is required for the revise loop to function at all.** To continue a tool conversation the loop must append the assistant's turn *including the call it made*, then the tool results. Ollama's chat template renders `tool_calls` off the assistant message; without it the tool results arrive unmoored and the model re-issues calls it has already made, burning the turn cap.
+
+**`vision` takes `options` and `format`.** Without them the critic cannot be seeded or temperature-controlled, which makes the bench — the instrument that exists to tune the confidence floors — non-reproducible no matter what the config records. `format: "json"` is also the cheapest available mitigation for malformed critique output.
+
+Errors: `OllamaUnreachableError(endpoint)`, `OllamaTimeoutError(model, elapsedMs)`.
+
+---
 
 ## 7. Pipeline and control flow
 
 ### 7.1 State machine
 
 ```
-IDLE ──start(prompt, size, palette)──► DRAFTING
-                                          │
-        ┌── repairs > threshold ──────────┤
-        │   && retries remain             │ ok
-        └──────────► DRAFTING             ▼
-                                       LINTING ──errors──► FAILED
-                                          │ ok
-                                          ▼
-                                     CRITIQUING
-                        ┌─────────────────┼─────────────────┐
-             no high-sev│      round ≥    │                 │ issues remain
-             issues     │      maxRounds  │                 ▼
-                        ▼                 ▼             REVISING
-                   AWAITING_USER ◄────────┘        (≤ maxReviseTurns)
-                     │        ▲                          │
-              accept │        │ feedback                 │ done() / cap
-                     ▼        │                          ▼
-                   DONE       └──────────── snapshot round, empty diff?
-                                              │                │
-                                      no ─────┘                └── yes ──► AWAITING_USER
-                                      (round+1 → LINTING)
+IDLE ──start──► DRAFTING ──repairs over threshold, retries remain──┐
+                    │  │                                            │
+                    │  └────────────────◄───────────────────────────┘
+                    │
+                    ├── repairs over threshold, no retries ──► FAILED
+                    ├── timeout / unreachable ───────────────► FAILED
+                    ▼
+                 LINTING  (pure; cannot fail — see §6.5)
+                    ▼
+                CRITIQUING ── timeout / unreachable ─────────► FAILED
+                    ▼
+            ┌── SNAPSHOT ROUND ──┐   Round = { doc, lint(doc), critique(doc),
+            │   (always, every   │            filteredIssues, diffFromPrev }
+            │    iteration)      │
+            └─────────┬──────────┘
+                      ▼
+              evaluate stop conditions on the FILTERED issue list
+                      │
+        ┌─────────────┼──────────────┬──────────────────┐
+        │             │              │                  │
+   no high-sev   round ≥        critic degraded    high-severity
+   issues        maxRounds                         issues remain
+        │             │              │                  │
+        ▼             ▼              ▼                  ▼
+   AWAITING_USER ◄────┴──────────────┘              REVISING
+        │    ▲                                    (≤ maxReviseTurns)
+        │    │                                          │
+ accept │    │ feedback                                 │ done() / cap
+        │    │                                          ▼
+        ▼    │                                   diff(before, after)
+      DONE   │                                          │
+             │                              ┌───────────┴───────────┐
+             │                        empty │                       │ changed
+             │                              ▼                       ▼
+             └──────────────────────► AWAITING_USER           round + 1 → LINTING
+                                            ▲                       
+                                            │ timeout ──────► FAILED
 ```
 
-Every transition emits a typed event over IPC so the UI shows live progress rather than a spinner.
+Four things changed from v1, each because the v1 diagram was wrong:
+
+1. **The snapshot moved to the top of every iteration** (ruling R2). In v1 it sat only on the `REVISING` exit, so a run converging on its first critique returned `rounds: []` — nothing to export, accept, render or measure. It also meant a `Round` held a post-revise `doc` beside a pre-revise `lint` and `critique`, so the dock would highlight issue regions against pixels that had already changed.
+2. **`empty-diff` is evaluated on the revise transition**, as `diff(docBefore, docAfter)` — never by reading a stored `diffFromPrev`.
+3. **The feedback edge points `AWAITING_USER → REVISING`.** v1 drew it pointing *into* `AWAITING_USER`, and drew no edge at all for the transition §7.3 describes.
+4. **Failure edges exist.** v1 drew `FAILED` reachable only from `LINTING` — the one stage that cannot fail — while §9 required failure from three stages that had no edge.
+
+The stop predicates are mutually exclusive and evaluated in the order listed. In v1 a single medium-severity issue satisfied both "no high-sev issues" and "issues remain".
+
+Every transition emits a typed event. **`REVISING` emits per-turn progress** — it is the longest stage, and without it §7.1's promise of live progress holds for state changes only while the 40-turn loop shows a single static label.
 
 ### 7.2 Stop conditions
 
-**Ordering matters and is not optional:** the confidence filters from 6.4 are applied to the issue list *first*, and stop conditions are evaluated on the **filtered** list. A high-severity issue the critic reported at `confidence: 0.1` is discarded, and therefore does not keep the loop running.
+**Ordering is not optional:** the confidence filters (§6.4) apply first, and the stop conditions evaluate on the **filtered** list. A high-severity issue the critic reported at `confidence: 0.1` is discarded and does not keep the loop running.
 
-Three independent conditions, each catching a different failure:
+| Reason | Trigger |
+|---|---|
+| `no-high-severity` | Zero high-severity issues after filtering — the intended success path |
+| `round-cap` | `round >= maxRounds` |
+| `empty-diff` | The revise stage ran and changed nothing. Catches a critic reporting an issue the agent cannot fix, which would otherwise burn every round |
+| `critic-failed` | Two consecutive unparseable critiques. **Distinct from `no-high-severity`** — without it a broken critic reports success and the user is told the sprite passed a critique that never ran |
 
-1. **No high-severity issues** (after filtering) — the intended success path.
-2. **Round cap** — bounds worst-case latency.
-3. **Empty diff** — the revise stage ran and changed nothing. Without this, a critic reporting an issue the agent cannot fix burns every round, every time.
+An **empty filtered issue list skips `REVISING` unconditionally**, including when `stopOnNoHighSeverity` is false. There is nothing for the agent to do and no prompt that would make sense.
 
 ### 7.3 User feedback
 
-At the gate, user feedback is injected as a **synthetic high-severity issue** with `confidence: 1.0` and `suggestConfidence: 0.0`, re-entering the machine at `REVISING`. Agent feedback and user feedback then travel one code path, so there is a single loop to build, test and debug rather than two.
+At the gate, feedback is injected as a **synthetic high-severity issue** with `confidence: 1.0` and `suggestConfidence: 0.0`, re-entering at `REVISING`. Agent feedback and user feedback then travel one code path, so there is a single loop to build, test and debug.
+
+The synthetic issue survives its own filter by construction: `confidence: 1.0` clears any floor, and blanking a `suggest` that is already `""` is a no-op, so `filterIssues` is idempotent on it.
+
+Feedback is recorded in `Round.userFeedback`, and the resulting round's `parentId` points at the round the user was looking at — which may not be the last one.
 
 ### 7.4 Prompt strategy
 
-- **Draft** — system prompt carries encoding rules, canvas dimensions, and the palette as an indexed table, plus two short worked examples. Prefixed `/no_think`: qwen3's thinking mode roughly doubles the 30 s draft for no benefit on a formatting-constrained task.
-- **Critique** — the upscaled PNG, the raw row text, and the intent. Image for gestalt, text for coordinates.
-- **Revise** — the filtered issue list, the current grid as text, and the three tools.
+- **Draft** — encoding rules, canvas dimensions, the palette as an indexed table, two short worked examples. Prefixed `/no_think`. The model must emit `{ intent: { subject, … }, rows: [...] }`; `parseDraft` never throws, and unparseable output degrades to `rows: []`, which §6.3 charges as `w × h` repairs and routes into the existing retry path.
+- **Critique** — the upscaled PNG, the raw row text, and the intent. Image for gestalt, text for coordinates. `format: "json"`.
+- **Revise** — the filtered issue list, the current grid as text, three tools. Prefixed `/no_think`.
+
+### 7.5 Round numbering and `meta` ownership
+
+**The draft is round 1**, and `maxRounds` bounds the number of **critiques** — so `maxRounds: 3` yields at most 3 critiques and 2 revise passes. v1 pinned neither, and the two readings differ by a whole revise pass.
+
+**The pipeline constructs every `SpriteDoc.meta`.** `draft()` produces the first document; every later document is assembled by the pipeline from the `Grid` that `revise()` returns, with a fresh `id` and `createdAt`, `parentId` pointing at its source, the current `round`, and `repairs: 0` / `repairedRows: []`.
+
+Inheriting `meta` was a real defect in v1: every round shared one `id`, `parentId` was permanently `null` so the lineage field was inert, and `repairedRows` propagated forward so `row-repaired` re-fired on rounds where the agent had already fixed those rows.
+
+---
 
 ## 8. User interface
 
-Canvas-centric layout, validated as an interactive prototype during design.
+Canvas-centric layout, validated as an interactive prototype during design and ratified by the user. The prototype at `docs/superpowers/specs/design/2026-07-28-editor-layout-b.html` is the design lock.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -372,11 +505,12 @@ Canvas-centric layout, validated as an interactive prototype during design.
 ├────────────────────────────────────┬─────────────────────┤
 │                                    │  CRITIQUE · round 2 │
 │            pixel canvas            │  ┌────────────────┐ │
-│         (dominant, zoomable)       │  │ left eye reads │ │
+│         (dominant)                 │  │ left eye reads │ │
 │                                    │  │ as a smudge    │ │
 │                                    │  │ conf .91 ▓▓▓▓  │ │
 │           palette swatches         │  │ sugg .40 ▓▓    │ │
 │                                    │  └────────────────┘ │
+│                                    │  LINT · 2 orphans   │
 ├────────────────────────────────────┴─────────────────────┤
 │ [draft] [r1] [r2] [r3]              [Accept] [Export PNG] │
 ├──────────────────────────────────────────────────────────┤
@@ -384,28 +518,36 @@ Canvas-centric layout, validated as an interactive prototype during design.
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Canvas dominates.** Manual editing uses the active palette color and routes through `shared/grid.ts`.
-- **Round filmstrip along the bottom.** Each frame is built by applying that round's `diffFromPrev` to the previous round, so the history being scrubbed *is* the data model. This makes rounds spatially comparable in a way a sidebar list does not.
-- **Critique dock appears only when issues exist**, keeping the canvas dominant during manual editing when the critic has nothing to say. Clicking an issue highlights its region on the canvas.
-- **Confidence rendered as twin bars**, so the high-confidence/low-suggest-confidence case is visible at a glance.
-- **Status bar** names the current state and the stop condition that fired.
+- **Canvas dominates.** Manual editing uses the active palette colour and routes through `shared/grid.ts`. Editing is a **main-process operation** — the renderer sends the edit and receives the updated document and a fresh lint report. A renderer-local edit would be invisible to export, history and the critic, which in v1 meant hand-editing then exporting produced a PNG without the edits and without an error.
+- **An edit to the last round mutates it. An edit to an earlier round appends a new round** parented to the one edited. Mutating an earlier round in place would invalidate every later round's `diffFromPrev`, and the filmstrip is defined as replaying those diffs.
+- **Round filmstrip along the bottom.** Frames are built by replaying `diffFromPrev`, so the history being scrubbed *is* the data model. Rounds not yet run render as pending placeholders, which requires `maxRounds` — available via `getConfig()`.
+- **The critique dock renders whenever a critique exists** (ruling R2), including a converged one, which shows "no high-severity issues" plus the lint block. v1's spec said the dock hides when there are no issues; the ratified prototype disagreed, and a converged run would have looked identical to one that never critiqued. The prototype wins.
+- **The dock renders `Round.lint`** alongside the critique. v1 built a whole deterministic linter whose output reached no surface.
+- **Confidence renders as twin bars**, so the high-confidence / low-suggest-confidence case is visible at a glance.
+- **Clicking an issue highlights its region** on the canvas.
+- **Accept** records `acceptedRound` and transitions to `DONE`. Any round may be accepted, not only the last.
+- **Status bar** names the current state and the stop reason that fired, both read from `SessionHistory` so they survive a reload.
+- **When Ollama is unreachable**, Generate is disabled and the status bar names the exact endpoint. No silent fallback.
+
+---
 
 ## 9. Error handling
 
-*Not yet reviewed — scrutinise this section.*
-
 | Failure | Response |
 |---|---|
-| Ollama unreachable | Status bar names the exact endpoint; Generate disabled; explicit retry. No silent fallback. |
-| Bound model not installed | Pickers list only installed models, so this is mostly prevented. If a model disappears mid-session, fail the round naming the model and the `ollama pull` command that fixes it. |
-| Draft repairs over threshold | Retry once with the misalignment described back to the model; on second failure enter `FAILED` with the raw model output preserved in history for debugging. |
-| Critic returns non-JSON or schema-invalid output | Reprompt once with the validation error appended. On second failure, treat the round as "no issues" and advance to `AWAITING_USER`. A broken critic must not destroy a valid sprite. |
-| Critic returns an out-of-bounds region | Clamp to canvas and warn. If the region lies entirely outside, drop the issue. |
-| Revise agent emits an invalid tool call | Return an error string to the agent so it can self-correct; the attempt counts against the turn cap. |
-| Revise agent hits the turn cap without `done()` | Accept whatever edits landed, snapshot the round, continue. The empty-diff condition handles the degenerate case. |
-| Revise agent makes the sprite worse | **Any round may be accepted, not only the last.** The filmstrip is the mitigation — the user scrubs back and accepts an earlier round. |
-| Model call exceeds `callTimeoutMs` | Abort via `AbortController`, fail the round with elapsed time shown. |
-| App closes mid-run | `SessionHistory` is written after each round, so at most one round is lost. |
+| Ollama unreachable | Status bar names the exact endpoint; Generate disabled; explicit retry. Errors cross IPC as a result envelope, not a rejection — `ipcMain.handle` destroys the error's own fields, which would have discarded the endpoint the message is about |
+| Bound model not installed | Pickers list only installed models. If one disappears mid-session, fail the round naming the model and the `ollama pull` command that fixes it |
+| Draft repairs over threshold | Retry once with the specific defects named by kind; on second failure enter `FAILED` and record the raw output in `SessionHistory.draftFailures` |
+| Draft output unparseable | Not an error — degrades to `rows: []`, which §6.3 charges as `w × h` repairs and routes into the retry path above |
+| Critique missing optional fields | Repaired per §6.4, not rejected |
+| Critique unparseable | Reprompt once. On second failure, `degraded: true` with `overall: null`, and the run stops with `critic-failed` — never reported as success |
+| Critique region out of bounds | Clamped on the raw JSON before validation; dropped if entirely outside |
+| Revise emits an invalid tool call | Error string returned to the agent so it can self-correct; counts against the cap |
+| Revise turn with zero tool calls | Counts against the cap; a nudge naming the three tools is injected |
+| Revise hits the cap without `done()` | Accept whatever edits landed, snapshot, continue. `hitCap` is recorded on the round |
+| Revise makes the sprite worse | **Any round may be accepted, not only the last.** The filmstrip is the mitigation |
+| Model call exceeds the scaled `callTimeoutMs` | Abort via `AbortController`; `OllamaTimeoutError(model, elapsedMs)`; the round enters `FAILED` with elapsed time shown |
+| App closes mid-run | History is persisted after every round via `PipelineDeps.persist`, so at most one round is lost |
 
 ## 10. Testing
 
@@ -429,22 +571,27 @@ Canvas-centric layout, validated as an interactive prototype during design.
 
 A fixed eval set of ten prompts (flower, dog, sword, tree, house, fox, chest, potion, knight, fish) run end to end at 32×32:
 
-| Criterion | Bar |
-|---|---|
-| Completes without crash | 10 / 10 |
-| Median `meta.repairs` | < 5% of cells |
-| Linter errors on final sprite | 0 / 10 |
-| Converges before the round cap | ≥ 5 / 10 |
-| Human rating ≥ 3/5 | ≥ 6 / 10 *(provisional)* |
+| Criterion | Bar | Measured from |
+|---|---|---|
+| Completes without crash | 10 / 10 | `SessionHistory.outcome === "completed"` |
+| Median `meta.repairs` | < 5% of cells | `rounds[0].doc.meta.repairs / (w × h)` |
+| Zero lint **warnings of severity** on the final sprite — no orphans, no outline gaps | 10 / 10 | `rounds.at(-1).lint.warnings` |
+| Converges before the round cap | ≥ 5 / 10 | `stopReason === "no-high-severity"` |
+| Critic actually ran | 10 / 10 | `stopReason !== "critic-failed"` |
+| Human rating ≥ 3/5 | ≥ 6 / 10 *(provisional)* | the human |
 
-The first four are objective and should hold. The fifth is subjective, and it is the one that determines whether the critic is earning its runtime — if a 7B VLM turns out too weak to critique pixel art usefully, that shows up here, and the response is to try `qwen3-vl:30b-a3b` before redesigning the loop.
+Every objective bar names the persisted field it is read from. In v1 three of them were unmeasurable from the artifact: `outcome` and `stopReason` did not exist, and "linter errors" referred to a `LintReport.errors` field that nothing could ever populate (§6.5) — so the bar would have read `0/10` unconditionally and told us nothing.
+
+The `critic-failed` bar is new and matters most: without it, a run where the critic never parsed reports `no-high-severity` and scores as a *success* on the convergence bar.
+
+The last row is subjective, and it is the one that determines whether the critic is earning its runtime — if a 7B VLM turns out too weak to critique pixel art usefully, that shows up here, and the response is to try `qwen3-vl:30b-a3b` before redesigning the loop.
 
 ## 12. Provisional decisions
 
 Recorded so they are revisited rather than inherited:
 
 - **Critic criteria were designed before observing real failure modes.** The recommendation during brainstorming was to ship generation first and design the critic against real output; the decision was to spec the full MVP in one pass. The severity thresholds, `confidenceFloor`, and `suggestConfidenceFloor` defaults are therefore first guesses to be tuned with `npm run bench`.
-- **`maxRounds: 3`** is a latency-driven guess (~90 s worst case), not an empirical optimum.
+- **`maxRounds: 3`** is a guess, not an empirical optimum — and v1 defended it as "~90 s worst case", which was wrong by more than an order of magnitude. Re-derived: 3 critiques × (a 512px vision call, plus a revise loop of up to 40 tool-calling turns at ~35 output tokens each at the measured 28.4 tok/s) is **several minutes**, not ninety seconds. There is no `maxTotalMs`, so the round cap is the only wall-clock bound in the design. This also sets the bench's runtime — 10 prompts × M configs — and should be re-derived from real timings once `Round.timings` has data.
 - **The 16-color cap** follows from single-hex-character encoding. Raising it means changing the encoding.
 - **`qwen3-vl:8b-instruct` as default critic** — untested on this task. The 30b-a3b upgrade path exists precisely because 8B may prove insufficient.
 
