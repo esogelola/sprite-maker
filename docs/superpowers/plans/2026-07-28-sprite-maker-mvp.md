@@ -123,11 +123,15 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   confidenceFloor: 0.30,
   suggestConfidenceFloor: 0.50,
   stopOnNoHighSeverity: true,
-  criticUpscale: 16,
+  criticUpscale: 16,          // ← SUPERSEDED, see below
   callTimeoutMs: 120000,
   models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
 }
 ```
+
+> **Historical record — this literal is no longer current.** Wave 1 shipped exactly the above, and it is still what `src/shared/schema.ts` contains until Wave 2c runs. But `criticUpscale` is **superseded by `criticTargetPx` (default 512)** in spec §6.8, because a fixed multiplier renders 64×64 to 1024px for the vision encoder to throw away. Read spec §6.8, not this block, for the current shape.
+>
+> This annotation exists because a stale literal in this plan has already caused two defects: the pre-A4 `normalize` body (which an implementer would have copied verbatim) and Wave 2's acceptance criterion 3. A code block in a plan is read as authoritative whether or not it is labelled as history.
 
 Bundled palettes are exactly the five from spec §6.1a: `pico-8` (16), `db16` (16), `aap-16` (16), `nes-16` (16), `gameboy` (4).
 
