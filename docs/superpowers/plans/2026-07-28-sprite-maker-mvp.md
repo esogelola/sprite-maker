@@ -611,7 +611,7 @@ Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is roun
 7. Derived docs carry a fresh `id`, correct `parentId`, and `repairedRows: []`.
 8. **After a revised round, `rounds[i].revise.turns` and `rounds[i].timings.reviseMs` are populated** — not `null`. Reviewer runs a two-round scenario and inspects round 0. This is the check that catches the two-phase lifecycle being skipped, which would silently empty three bench columns.
 9. **A history persisted mid-run reads `outcome: "failed"`.** Only a genuinely completed run flips it to `"completed"` — an interrupted run is a failed run, and §11's first bar reads this field.
-10. `acceptedRound` stores `Round.round` (1-based), not the array index it was called with.
+10. `acceptedRound` stores `Round.round` (1-based), not the array index it was called with. **Assert on the `SessionHistory` returned by `accept(0)` directly, not only on a `saveHistory` round-trip.** The schema rejects `acceptedRound: 0` at parse time, so an implementation that stores the raw index and validates only on save turns an off-by-one into a save error at the end of a multi-minute run — far from its cause, and only on the path that persists.
 11. The whole suite runs with Ollama stopped.
 12. Event trace committed showing the real state sequence.
 13. Only Wave 9 whitelist files touched.
