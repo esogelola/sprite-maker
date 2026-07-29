@@ -35,7 +35,7 @@ Copied verbatim from the spec. Every wave's requirements implicitly include thes
 - **`HarnessConfig` is serialized into `SessionHistory` on every run.**
 - **`suggest` is advisory**, never applied verbatim.
 - **Any round may be accepted, not only the last.**
-- **Node 22.9.** Package manager: npm.
+- **Node 22.15.0**, pinned by a committed `.nvmrc` (spec amendment A3). Package manager: npm.
 - **Default model bindings:** generator `qwen3:8b`, critic `qwen3-vl:8b-instruct-q4_K_M`.
 
 ## Evidence requirements
@@ -63,7 +63,7 @@ The editor layout was ratified by the user against an interactive prototype duri
 | 2 | `src/shared/grid.ts`, `tests/shared/grid.test.ts` | — |
 | 3 | `src/main/lint.ts`, `tests/main/lint.test.ts`, `tests/fixtures/sprites.ts` | — |
 | 4 | `src/main/render.ts`, `tests/main/render.test.ts`, `tests/fixtures/golden/*.png` | `package.json` |
-| 5 | `src/main/ollama.ts`, `src/main/models.ts`, `tests/main/ollama.test.ts`, `tests/main/models.test.ts`, `tests/stubs/ollama.ts` | — |
+| 5 | `src/main/ollama.ts`, `src/main/models.ts`, `tests/main/ollama.test.ts`, `tests/main/models.test.ts`, `tests/stubs/ollama.ts`, `tests/live/smoke.test.ts` | `package.json` |
 | 6 | `src/main/draft.ts`, `src/main/prompts/draft.ts`, `tests/main/draft.test.ts` | — |
 | 7 | `src/main/critique.ts`, `src/main/prompts/critique.ts`, `tests/main/critique.test.ts` | — |
 | 8 | `src/main/revise.ts`, `src/main/prompts/revise.ts`, `tests/main/revise.test.ts` | — |
@@ -122,7 +122,7 @@ Bundled palettes are exactly the five from spec §6.1a: `pico-8` (16), `db16` (1
 
 **Steps:**
 
-- [ ] **1.1** `npm init -y`; install `electron@43 electron-vite@5 react@19 react-dom zod@4 pngjs@7` and dev deps `typescript vitest@4 @types/node @types/react @types/react-dom @types/pngjs`. Pin majors in `package.json`.
+- [ ] **1.1** `npm init -y`; install runtime deps `react@19 react-dom zod@4 pngjs@7` and dev deps `electron@43 electron-vite@5 typescript vitest@4 @types/node @types/react @types/react-dom @types/pngjs`. Pin majors in `package.json`. **Amendment P3:** `electron` and `electron-vite` are **devDependencies**, not dependencies — an earlier draft of this step had them as runtime deps, which would bundle Electron into the packaged app.
 - [ ] **1.2** Write `tsconfig.json` (strict, `moduleResolution: "bundler"`, paths `@shared/*` → `src/shared/*`, `@main/*` → `src/main/*`) and `vitest.config.ts` (node environment, same path aliases).
 - [ ] **1.3** Write `tests/shared/palettes.test.ts` **first**: every palette has 4–16 colors; every color matches `/^#[0-9A-Fa-f]{6}$/`; no duplicate colors within a palette; `getPalette("nope")` throws; `listPalettes()` returns 5 entries.
 - [ ] **1.4** Run `npx vitest run tests/shared/palettes.test.ts`. Expected: FAIL — module not found.
@@ -130,7 +130,7 @@ Bundled palettes are exactly the five from spec §6.1a: `pico-8` (16), `db16` (1
 - [ ] **1.6** Write `tests/shared/schema.test.ts` **first**: `SpriteDocSchema` rejects a doc whose `rows.length !== size.h`; rejects a row containing `g`; rejects `size.w = 24`; accepts a valid 16×16 doc. `CritiqueReportSchema` rejects `confidence: 1.4` and `severity: "critical"`. `HarnessConfigSchema.parse({})` yields `DEFAULT_HARNESS_CONFIG`.
 - [ ] **1.7** Run it. Expected: FAIL.
 - [ ] **1.8** Implement `src/shared/schema.ts`. Run. Expected: PASS.
-- [ ] **1.9** Copy the ratified prototype to `docs/superpowers/specs/design/2026-07-28-editor-layout-b.html`. Write `README.md` (what this is, how to run, model prerequisites with the exact `ollama pull` commands).
+- [ ] **1.9** Write `README.md` (what this is, how to run, model prerequisites with the exact `ollama pull` commands). **Amendment P4:** an earlier draft also asked this step to copy the ratified prototype into `docs/.../design/`; it was already committed before Wave 1 in `87e8798`, so that clause is removed.
 - [ ] **1.10** Run `npx vitest run`. Commit.
 
 **Acceptance criteria (reviewer checks these as numbered gates):**
@@ -342,7 +342,7 @@ export function createModelRegistry(client: OllamaClient, cfg: HarnessConfig): M
 - [ ] **5.4** Implement `src/main/ollama.ts`.
 - [ ] **5.5** Write `tests/main/models.test.ts`: `roles()` returns config defaults; `bind` changes them; `list()` delegates to the client.
 - [ ] **5.6** Implement `src/main/models.ts`. Run all. Expected: PASS.
-- [ ] **5.7** Write the opt-in live smoke test `tests/live/smoke.test.ts`, tagged so default `npm test` skips it, asserting only that a real `qwen3:8b` call returns a non-empty string. Add `npm run test:live`.
+- [ ] **5.7** Write the opt-in live smoke test `tests/live/smoke.test.ts` asserting only that a real `qwen3:8b` call returns a non-empty string. Add the `test:live` script to `package.json`. **Amendment P1:** `vitest.config.ts` is not in this wave's whitelist and its `include` glob is `tests/**/*.test.ts`, so this file would otherwise run during default `npm test`. Guard it with an in-file `describe.skipIf(!process.env.LIVE)` rather than a config change — the guard belongs with the test regardless, since it documents its own precondition.
 - [ ] **5.8** Run `npm run test:live` once; save the raw output to `docs/superpowers/specs/captures/2026-07-28-wave-5-live-smoke.txt`. Commit.
 
 **Acceptance criteria:**
@@ -597,7 +597,7 @@ export function useEditor(): EditorState & { setPixel(x,y): void; selectColor(ch
 **Steps:**
 
 - [ ] **11.1** Install `@playwright/test`; write `playwright.config.ts` targeting Electron via `_electron.launch()`.
-- [ ] **11.2** Write `tests/renderer/Canvas.test.tsx` **first**: a 16×16 doc renders 256 cells; a transparent cell renders the checkerboard class; clicking a cell calls `setPixel` with the right coords and the active index.
+- [ ] **11.2** Write `tests/renderer/Canvas.test.tsx` **first**: a 16×16 doc renders 256 cells; a transparent cell renders the checkerboard class; clicking a cell calls `setPixel` with the right coords and the active index. **Amendment P2:** this needs a DOM. `vitest.config.ts` is not in this wave's whitelist, so install `jsdom` and `@testing-library/react` (both covered by this wave's `package.json` entry) and select the environment with a per-file `// @vitest-environment jsdom` docblock rather than changing the global config — the node default is correct for every other suite and should stay.
 - [ ] **11.3** Run. Expected: FAIL.
 - [ ] **11.4** Implement `Canvas.tsx`, `PaletteBar.tsx`, `store.ts`; wire into `App.tsx`.
 - [ ] **11.5** Run. Expected: PASS.
