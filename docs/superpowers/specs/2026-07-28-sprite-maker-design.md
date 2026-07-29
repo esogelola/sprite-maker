@@ -53,7 +53,9 @@ Measured on the target machine (Apple M2 Max, 32 GB), not estimated:
 | `qwen3-omni` / `qwen2.5-omni` on Ollama | **Not available** — both 404 |
 | `qwen3-vl` on Ollama | Available: 2b / 4b / 8b / 30b-a3b / 32b / 235b, instruct + thinking, q4/q8/bf16 |
 | API keys in environment | None (no NVIDIA/NGC, HuggingFace, Anthropic, OpenAI) |
-| Toolchain | Node 22.9, Python 3.10.4, Go 1.23.5 |
+| Toolchain | Node **22.15.0** (see A3), Python 3.10.4, Go 1.23.5 |
+
+**Amendment A3 — Node floor.** `electron@43` declares `engines.node >= 22.12.0` and `electron-vite@5` wants `^20.19.0 || >=22.12.0`; the machine's default 22.9.0 satisfies neither, and the Electron binary postinstall failed under it. Pinned to 22.15.0 via a committed `.nvmrc`. `package.json` carries `engines.node >= 22.12`.
 
 **Model role bindings (defaults):**
 
@@ -121,6 +123,8 @@ Two boundaries carry the most weight:
 
 One character per pixel: `.` = transparent, `0`–`f` = palette index 0–15.
 
+**Lowercase only.** `A`–`F` are rejected, not folded. Admitting both cases would give one pixel two spellings, which silently breaks row equality, `diff`, the empty-diff stop condition, and §10's golden-file byte comparison — four failures whose common cause would be invisible at each site.
+
 ```
 "................"
 ".....0000000...."
@@ -166,10 +170,15 @@ A palette with fewer than 16 entries simply makes indices beyond its length inva
     criticModel: string,
     round: number,
     repairs: number,
+    repairedRows: number[],        // amendment A1 — see below
     parentId: string | null
   }
 }
 ```
+
+`id` is a UUID by convention and is **not** format-validated: hand-built test fixtures need to carry readable ids, and enforcing the format buys no safety. `createdAt` *is* validated as ISO 8601.
+
+**Amendment A1 — `meta.repairedRows`.** The original §6.2 omitted this field. It is required: §6.5's `row-repaired` warning is defined per repaired row, and which rows were repaired is knowable only at parse time — it is unrecoverable from the finished grid, because a repaired row is indistinguishable from a row the model got right. The field carries a `[]` default, so a document written to the original §6.2 shape still parses.
 
 ### 6.3 Row repair
 
@@ -216,7 +225,7 @@ Pure functions over the grid, zero inference:
 
 ```ts
 {
-  errors: [...],                 // schema violations — block the round
+  errors: LintWarning[],         // schema violations — block the round; see A2
   warnings: [{
     code: "orphan-pixel" | "unused-palette-entry" | "low-contrast"
         | "outline-gap" | "row-repaired",
@@ -243,6 +252,8 @@ This is where per-cell scoring actually lives — relocated from the VLM to wher
 | `row-repaired` | Emitted once per row that section 6.3 had to repair, carrying that row's cells. Surfaces generator failure rather than sprite failure. |
 
 `symmetryScore` is the fraction of non-transparent cells whose mirror about the **vertical centre axis** holds the same index. It is a reported metric, never an error — plenty of good sprites are deliberately asymmetric.
+
+**Amendment A2 — `errors` element shape.** The original §6.5 wrote `errors: [...]` without defining an element, leaving each implementer to invent one. `errors` and `warnings` now share the `LintWarning` shape — `{ code, cells, message }` — and differ only in which list they land in. One type, one renderer, and an error can point at offending cells exactly as a warning does.
 
 ### 6.6 Revise-stage tools
 
