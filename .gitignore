@@ -1,0 +1,14 @@
+node_modules/
+dist/
+out/
+.vite/
+*.log
+
+# Superpowers brainstorm scratch
+.superpowers/
+
+# Local run artifacts
+bench-results/
+sessions/
+*.local.json
+.DS_Store
