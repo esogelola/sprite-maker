@@ -60,10 +60,28 @@ describe("bundled palette library (spec §6.1a)", () => {
     );
   });
 
-  it("exposes palettes as data, not as a live handle onto internal state", () => {
-    const before = getPalette("gameboy").colors.length;
-    const copy: Palette = { ...getPalette("gameboy") };
-    copy.colors = [];
-    expect(getPalette("gameboy").colors).toHaveLength(before);
+  it("freezes palette colour arrays against mutation by any consumer", () => {
+    const colors = getPalette("gameboy").colors as string[];
+    expect(Object.isFrozen(colors)).toBe(true);
+    expect(() => colors.push("#ffffff")).toThrow(TypeError);
+    expect(getPalette("gameboy").colors).toHaveLength(4);
+  });
+
+  it("freezes the palette objects themselves", () => {
+    const p = getPalette("pico-8") as { name: string };
+    expect(Object.isFrozen(p)).toBe(true);
+    expect(() => {
+      p.name = "hijacked";
+    }).toThrow(TypeError);
+    expect(getPalette("pico-8").name).not.toBe("hijacked");
+  });
+
+  it("freezes the PALETTES registry against added or swapped entries", () => {
+    const reg = PALETTES as Record<string, Palette>;
+    expect(Object.isFrozen(reg)).toBe(true);
+    expect(() => {
+      reg.evil = { id: "evil", name: "evil", colors: ["#000000"] };
+    }).toThrow(TypeError);
+    expect(Object.keys(PALETTES)).toHaveLength(5);
   });
 });

@@ -11,9 +11,9 @@
  */
 
 export interface Palette {
-  id: string;
-  name: string;
-  colors: string[];
+  readonly id: string;
+  readonly name: string;
+  readonly colors: readonly string[];
 }
 
 /** PICO-8 fantasy-console standard palette (Lexaloffle). */
@@ -133,13 +133,25 @@ const GAMEBOY: Palette = {
   ],
 };
 
-export const PALETTES: Record<string, Palette> = {
-  "pico-8": PICO_8,
-  db16: DB16,
-  "aap-16": AAP_16,
-  "nes-16": NES_16,
-  gameboy: GAMEBOY,
-};
+/**
+ * Palettes are shared singletons handed to the agent, the linter, the
+ * renderer and the UI. A mutation anywhere would corrupt every consumer,
+ * so freeze both the palette objects and their colour arrays at module
+ * load. `readonly` on the interface is a compile-time hint only — this
+ * is the runtime guarantee.
+ */
+function freezePalette(p: Palette): Palette {
+  Object.freeze(p.colors);
+  return Object.freeze(p);
+}
+
+export const PALETTES: Readonly<Record<string, Palette>> = Object.freeze({
+  "pico-8": freezePalette(PICO_8),
+  db16: freezePalette(DB16),
+  "aap-16": freezePalette(AAP_16),
+  "nes-16": freezePalette(NES_16),
+  gameboy: freezePalette(GAMEBOY),
+});
 
 /** Look up a bundled palette. Throws on an unknown id — never returns a stub. */
 export function getPalette(id: string): Palette {
