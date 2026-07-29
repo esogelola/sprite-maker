@@ -49,34 +49,45 @@ Per `evidence-on-disk`, any wave claiming a live-verification result must commit
 
 Inline narration is not evidence. A reviewer rejects when a live-verification criterion is claimed but no matching file appears in `git status --short`.
 
+Captures may be `.txt` or `.csv`. These paths are **implicitly whitelisted for every wave** — see the standing exception under the scope table. Without that clause this rule and the whitelist rule contradict each other, and a reviewer applying both would reject a wave that did everything right.
+
 ## Design lock
 
 The editor layout was ratified by the user against an interactive prototype during brainstorming. That prototype is committed **alongside this plan** (before Wave 1) as `docs/superpowers/specs/design/2026-07-28-editor-layout-b.html` and is the **ruled design** for Waves 11–12. Visual gates judge rendered screenshots against it, with the prototype as the "better than / worse than" axis.
+
+Two limits on that, both found by the audit:
+
+- **Where the prototype and spec §8 disagreed about the critique dock, the prototype won** (ruling R2). The dock renders whenever a critique exists, including a converged one. Spec §8 has been patched to match.
+- **The prototype has no empty state** — it loads with the fox already drawn and rounds 1–3 as pending placeholders. So Wave 12's required first-run screenshot is judged against **written criteria, not the prototype**. A gate that can only compare against a populated design cannot judge the state where the design has nothing to hold.
 
 ---
 
 ## Wave scope table
 
+> **v2 — 2026-07-29.** Waves 3–14 were rewritten after the consistency audit (see `docs/superpowers/specs/2026-07-29-consistency-audit-findings.md`). Waves 1 and 2 below are the historical record of what shipped and are not re-executed. **Wave 2c is new** — it exists because the audit found that no wave after Wave 1 could modify `src/shared/schema.ts`, which stranded amendment A2 and every subsequent schema-shaped finding.
+
 | Wave | New files | Modified files |
 |------|-----------|----------------|
 | 1 | `package.json`, `tsconfig.json`, `electron.vite.config.ts`, `vitest.config.ts`, `src/shared/schema.ts`, `src/shared/palettes.ts`, `tests/shared/schema.test.ts`, `tests/shared/palettes.test.ts`, `README.md` | `.gitignore` |
 | 2 | `src/shared/grid.ts`, `tests/shared/grid.test.ts` | — |
+| 2b | — | `src/shared/grid.ts`, `tests/shared/grid.test.ts`, `src/shared/schema.ts`, `tests/shared/schema.test.ts` |
+| **2c** | — | `src/shared/schema.ts`, `tests/shared/schema.test.ts` |
 | 3 | `src/main/lint.ts`, `tests/main/lint.test.ts`, `tests/fixtures/sprites.ts` | — |
-| 4 | `src/main/render.ts`, `tests/main/render.test.ts`, `tests/fixtures/golden/*.png` | `package.json` |
+| 4 | `src/main/render.ts`, `tests/main/render.test.ts`, `tests/fixtures/golden/*.png` | `package.json`, `tests/fixtures/sprites.ts` |
 | 5 | `src/main/ollama.ts`, `src/main/models.ts`, `tests/main/ollama.test.ts`, `tests/main/models.test.ts`, `tests/stubs/ollama.ts`, `tests/live/smoke.test.ts` | `package.json` |
-| 6 | `src/main/draft.ts`, `src/main/prompts/draft.ts`, `tests/main/draft.test.ts` | — |
-| 7 | `src/main/critique.ts`, `src/main/prompts/critique.ts`, `tests/main/critique.test.ts` | — |
-| 8 | `src/main/revise.ts`, `src/main/prompts/revise.ts`, `tests/main/revise.test.ts` | — |
-| 9 | `src/main/history.ts`, `src/main/pipeline.ts`, `tests/main/pipeline.test.ts`, `tests/main/history.test.ts` | — |
-| 10 | `src/main/index.ts`, `src/main/ipc.ts`, `src/preload/index.ts`, `src/renderer/index.html`, `src/renderer/main.tsx`, `src/renderer/App.tsx`, `tests/main/ipc.test.ts` | `package.json`, `electron.vite.config.ts` |
-| 11 | `src/renderer/components/Canvas.tsx`, `src/renderer/components/PaletteBar.tsx`, `src/renderer/state/store.ts`, `tests/renderer/Canvas.test.tsx`, `e2e/canvas.spec.ts`, `playwright.config.ts` | `src/renderer/App.tsx`, `package.json` |
-| 12 | `src/renderer/components/PromptBar.tsx`, `CritiqueDock.tsx`, `Filmstrip.tsx`, `GateBar.tsx`, `StatusBar.tsx`, `ModelPickers.tsx`, `e2e/loop.spec.ts` | `src/renderer/App.tsx`, `src/renderer/state/store.ts` |
-| 13 | `src/main/export.ts`, `bench/run.ts`, `bench/prompts.ts`, `tests/main/export.test.ts` | `package.json`, `src/main/ipc.ts`, `src/renderer/components/GateBar.tsx` |
-| 14 | `docs/.../captures/2026-07-28-wave-14-e2e.txt`, `docs/.../screenshots/2026-07-28-wave-14-*.png` | `docs/.../specs/2026-07-28-sprite-maker-design.md` |
+| 6 | `src/main/draft.ts`, `src/main/prompts/draft.ts`, `tests/main/draft.test.ts` | `tests/stubs/ollama.ts` |
+| 7 | `src/main/critique.ts`, `src/main/prompts/critique.ts`, `tests/main/critique.test.ts` | `tests/stubs/ollama.ts` |
+| 8 | `src/main/revise.ts`, `src/main/prompts/revise.ts`, `tests/main/revise.test.ts` | `tests/stubs/ollama.ts`, `src/main/ollama.ts` |
+| 9 | `src/main/history.ts`, `src/main/pipeline.ts`, `tests/main/pipeline.test.ts`, `tests/main/history.test.ts` | `tests/stubs/ollama.ts` |
+| 10 | `src/main/index.ts`, `src/main/ipc.ts`, `src/preload/index.ts`, `src/renderer/index.html`, `src/renderer/main.tsx`, `src/renderer/App.tsx`, `tests/main/ipc.test.ts`, `playwright.config.ts`, `e2e/boot.spec.ts` | `package.json`, `electron.vite.config.ts` |
+| 11 | `src/renderer/components/Canvas.tsx`, `src/renderer/components/PaletteBar.tsx`, `src/renderer/state/store.ts`, `tests/renderer/Canvas.test.tsx`, `e2e/canvas.spec.ts` | `src/renderer/App.tsx`, `package.json` |
+| 12 | `src/renderer/components/PromptBar.tsx`, `CritiqueDock.tsx`, `Filmstrip.tsx`, `GateBar.tsx`, `StatusBar.tsx`, `ModelPickers.tsx`, `e2e/loop.spec.ts` | `src/renderer/App.tsx`, `src/renderer/state/store.ts`, `src/renderer/components/Canvas.tsx` |
+| 13 | `src/main/export.ts`, `bench/run.ts`, `bench/prompts.ts`, `tests/main/export.test.ts` | `package.json`, `tsconfig.json`, `src/main/ipc.ts`, `src/renderer/components/GateBar.tsx` |
+| 14 | — | `docs/superpowers/specs/2026-07-28-sprite-maker-design.md` |
 
 A reviewer's first check is always: *did the implementer touch only the files in this row?* Anything outside triggers automatic rejection. Whitelist expansion requires human escalation.
 
----
+**Standing exception — evidence artifacts.** Files under `docs/superpowers/specs/screenshots/` and `docs/superpowers/specs/captures/` whose names carry this wave's number are **implicitly whitelisted for every wave**, and are not scope creep. Without this clause the plan told reviewers to reject any file outside the row *and* to reject a wave whose required evidence was missing — a contradiction that fired on Waves 5, 9, 10, 11, 12 and 13, and would have rejected a wave that did everything right or taught an implementer to skip the capture.
 
 ## Wave 1 — Scaffold, schemas, palettes
 
@@ -158,7 +169,7 @@ export class GridError extends Error {
 export function indexChar(i: number): string              // 0..15 -> '0'..'f'
 export function charIndex(c: string): number              // '0'..'f' -> 0..15; '.' -> -1
 export function makeEmpty(w: number, h: number): Grid
-export function normalize(rows: string[], w: number, h: number):
+export function normalize(rows: string[], w: number, h: number, paletteSize: number):
   { grid: Grid; repairs: number; repairedRows: number[] }
 export function getPixel(g: Grid, x: number, y: number): string
 export function setPixel(g: Grid, x: number, y: number, ch: string, paletteSize: number): Grid
@@ -169,7 +180,7 @@ export function diff(a: Grid, b: Grid): PixelDiff[]
 **`normalize` is given literally** — it implements spec §6.3 and is the single most defect-prone function in the codebase:
 
 ```ts
-export function normalize(rows: string[], w: number, h: number) {
+export function normalize(rows: string[], w: number, h: number, paletteSize: number) {
   const grid: Grid = []
   const repairedRows: number[] = []
   let repairs = 0
@@ -182,8 +193,9 @@ export function normalize(rows: string[], w: number, h: number) {
     for (let x = 0; x < w; x++) {
       const c = src[x]
       if (c === undefined) { out += TRANSPARENT; rowRepairs++ }        // too short
-      else if (c === TRANSPARENT || charIndex(c) >= 0) { out += c }    // valid
-      else { out += TRANSPARENT; rowRepairs++ }                        // invalid char
+      else if (c === TRANSPARENT) { out += c }                         // always valid
+      else if (charIndex(c) >= 0 && charIndex(c) < paletteSize) { out += c }  // in palette
+      else { out += TRANSPARENT; rowRepairs++ }                        // invalid or off-palette
     }
     if (src.length > w) rowRepairs += src.length - w                   // truncated
 
@@ -225,198 +237,207 @@ export function setPixel(g: Grid, x: number, y: number, ch: string, paletteSize:
 **Acceptance criteria:**
 1. `npm test` green; grid suite has ≥ 20 assertions.
 2. `setPixel` on a `gameboy` doc (`paletteSize = 4`) with `ch = "9"` throws `GridError` with `code === "off-palette"` — reviewer verifies by execution, not inspection.
-3. `normalize(["ab"], 4, 1)` returns `repairs === 2` (2 pad) and `grid === ["ab.."]`. Reviewer runs this exact call. **Amendment P5:** this criterion originally asserted `repairs === 4` and `["...."]`, reasoning "2 invalid chars → transparent, 2 pad". That was wrong — `a` and `b` are palette indices 10 and 11 per spec §6.1, so they survive. The plan contradicted itself while the spec and the plan's own literal `normalize` agreed. `normalize(["AB"], 4, 1)` → `["...."]` with `repairs === 4` is the case the original arithmetic actually described, and both are now pinned by tests.
+3. `normalize(["ab"], 4, 1, 16)` returns `repairs === 2` (2 pad) and `grid === ["ab.."]`. Reviewer runs this exact call.
+
+   **Amendment P5:** this criterion originally asserted `repairs === 4` and `["...."]`, reasoning "2 invalid chars → transparent, 2 pad". That was wrong — `a` and `b` are palette indices 10 and 11 per spec §6.1, so they survive at any palette size ≥ 12. The plan contradicted itself while the spec and the plan's own literal `normalize` agreed with each other. The implementer refused to conform and reported it; a reviewer traced it independently and ruled the same way.
+
+   Three cases are now pinned, and the third only exists because of A4: `normalize(["ab"], 4, 1, 16)` → `["ab.."]`, 2 repairs; `normalize(["AB"], 4, 1, 16)` → `["...."]`, 4 repairs (the case P5's original arithmetic actually described, uppercase being invalid); and `normalize(["ab"], 4, 1, 4)` → `["...."]`, 4 repairs — the same input as the first case, now off-palette against a 4-colour ramp. That last pair is the clearest statement of what A4 changed: the answer depends on the palette, and a criterion written without one is not answerable.
 4. `setPixel` does not mutate its input — reviewer asserts the original grid is unchanged after the call.
 5. No imports from `main/`, `renderer/`, `electron`, `fs`, or `node:*` in `grid.ts`.
 6. Only Wave 2 whitelist files touched.
 
 ---
 
+## Wave 2c — Schema completion
+
+**Goal:** Land every schema-shaped finding from the audit in one file, so no later wave needs to reach into `src/shared/schema.ts`. This wave exists because the audit found that no wave after Wave 1 could modify the schema — which stranded amendment A2 (ratified in a `docs(spec):` commit and never implemented) and had nowhere to put `draftFailures`.
+
+**Everything here is defined in spec §6.5, §6.7, §6.8 and §6.9. Read those first; this list is the checklist, the spec is the contract.**
+
+| Change | Why |
+|---|---|
+| **Delete** `LintReport.errors` | Ruling R3. A4 made every violation it could describe unrepresentable before `lint()` is called |
+| `LintWarning.indices?: number[]` | Consumers had to regex free text to learn which palette index a warning concerns |
+| `symmetryScore` documented as `1` for a blank sprite | `0/0 = NaN` fails the schema bounds and serializes to `null` |
+| `SizeSchema` → union of three **square** literals | v1 admitted `{w:16, h:64}`; every consumer assumed square |
+| `Round`: add `filteredIssues`, `userFeedback`, `revise`, `timings`; make `diffFromPrev` nullable | Each is a field some consumer needed and no producer had. Nullable `diffFromPrev` is the one that matters most — see below |
+| `SessionHistory`: add `draftFailures`, `stopReason`, `finalState`, `outcome`, `acceptedRound` | Same |
+| `PipelineState`, `StopReason`, `PipelineEvent` move here from `main/pipeline.ts` | Preload and renderer consume them; a value import of `main/pipeline` pulls `node:http` into the renderer bundle |
+| `HarnessConfig`: `criticUpscale` → `criticTargetPx` (default 512) | A fixed multiplier sends 64×64 to 1024px for the encoder to discard |
+| `CritiqueReport`: `degraded: boolean`, `overall` and `readsAs` nullable | A degraded report had to invent a score, which then polluted every bench metric |
+| `ChatMessage`, `ToolCall`, `ChatTurn`, `ToolDef` types added | Wave 5 produces them, but preload and the stub need them and neither may import from `main/` |
+
+**The `diffFromPrev` nullability is the sharpest edge here.** Non-nullable made "this is the first round" and "the revise stage changed nothing" the *same value*, and spec §6.7 v1 pointed the stop condition directly at the stored field. An implementation following the spec literally stopped every run after the draft with a bogus `empty-diff`. Nullable makes the distinction representable; §7.2 makes it moot by evaluating `empty-diff` on the transition instead.
+
+- [ ] **2c.1** Write the failing tests first, one per row of the table above. For the deletions, assert the field is *gone* (`"errors" in parsed === false`). For `SizeSchema`, assert `{w:16,h:64}` fails. For `diffFromPrev`, assert `null` parses and that `null` and `[]` are distinguishable.
+- [ ] **2c.2** Run. Expected: FAIL.
+- [ ] **2c.3** Implement.
+- [ ] **2c.4** Run. Expected: PASS. Existing tests must still pass except those asserting deleted fields.
+- [ ] **2c.5** Add one off-palette fixture at **32×32** — amendment A4 is currently pinned only at 16×16 and only at palette sizes 4 and 16, which the Wave 2b reviewer flagged as a surviving mutant class.
+- [ ] **2c.6** Commit.
+
+**Acceptance criteria:**
+1. `npm test` green; `npx tsc --noEmit` clean.
+2. `LintReportSchema.parse({...})` **rejects** an object carrying `errors`.
+3. `SizeSchema` rejects `{w:16, h:64}` and accepts all three squares.
+4. `RoundSchema` accepts `diffFromPrev: null` and `diffFromPrev: []` as distinct values.
+5. `SessionHistorySchema.parse({})` fails; a fully-populated history round-trips through `JSON.stringify`/`parse` unchanged.
+6. An off-palette index is rejected at 32×32, not only 16×16.
+7. Only Wave 2c whitelist files touched.
+
+---
+
 ## Wave 3 — `main/lint.ts`
 
-**Goal:** The deterministic half of the review system, implementing spec §6.5 definitions exactly.
+**Goal:** The deterministic half of the review system. Spec §6.5 defines all five codes, their cardinality, and their `cells`/`indices` contents — **implement exactly that table and invent nothing.**
 
 **Interfaces produced:** `export function lint(doc: SpriteDoc): LintReport`
 
-**Amendment P6 — neighbour reads.** `orphan-pixel` and `outline-gap` are defined with "out-of-canvas counts as transparent", but `shared/grid.ts`'s `getPixel` **throws** on out-of-bounds, matching `setPixel`'s strictness. `lint.ts` must therefore define its own lenient neighbour read (a local `at(g, x, y)` returning `TRANSPARENT` outside the canvas) rather than discovering this through a thrown error mid-implementation. Do not add a lenient reader to `grid.ts` — it is out of this wave's whitelist, and strictness is correct there.
+Three things the audit found that would otherwise bite:
 
-**Amendment P7 — `errors` element shape.** Per spec amendment A2, `LintReport.errors` uses the same `{ code, cells, message }` shape as `warnings`.
+- **Neighbour reads must be lenient.** `orphan-pixel` and `outline-gap` are defined with "out-of-canvas counts as transparent", but `shared/grid.ts`'s `getPixel` **throws** out of bounds. Define a local `at(g, x, y)` returning `TRANSPARENT` outside the canvas. Do not add a lenient reader to `grid.ts` — out of whitelist, and strictness is correct there.
+- **`low-contrast` needs `i < j` and transparent exclusion.** `i === j` has Δluminance 0, so without the distinctness guard every filled sprite reports low-contrast against itself. And `charIndex('.')` is `-1`, so `colors[-1]` is `undefined` and the luminance parser crashes on the first sprite with a transparent neighbour — that is, all of them.
+- **Do not reimplement the luminance formula with rounding.** `gameboy` indices 2 and 3 sit 0.0006 below the 0.08 threshold. They are the canary.
 
-**The five warning codes are given literally**, because the spec forbids the implementation inventing others:
+- [ ] **3.1** Write `tests/fixtures/sprites.ts`. **Every fixture is the return value of `SpriteDocSchema.parse(...)` on an untyped object literal — never a bare `: SpriteDoc =` annotation.** The refinements are runtime-only, so a typed fixture silently bypasses row-count, row-length and off-palette validation, and `lint()` would then be tested against states that cannot occur in production. Fixtures: `SOLID_BLOCK`, `BLANK`, `ONE_ORPHAN`, `DIAGONAL_ONLY`, `HORIZONTAL_GAP`, `VERTICAL_GAP`, `LOW_CONTRAST_PAIR`, `PERFECT_MIRROR`, `FULLY_ASYMMETRIC`, plus at least one **32×32** and one using index 3 (Wave 4 needs both and cannot create them).
 
-| Code | Definition to implement |
-|---|---|
-| `orphan-pixel` | A non-transparent cell whose four **orthogonal** neighbours are all transparent. Out-of-canvas counts as transparent. Diagonal attachment does not rescue it. |
-| `outline-gap` | A transparent cell with non-transparent cells on **opposite** orthogonal sides (left *and* right, or above *and* below). |
-| `low-contrast` | Two palette indices used as orthogonal neighbours anywhere in the sprite whose WCAG relative luminance differs by `< 0.08`. Reported **once per index pair**, not per cell. |
-| `unused-palette-entry` | A palette index never appearing in `rows`. Informational. |
-| `row-repaired` | One warning per row in `meta.repairedRows`, carrying that row's cells. |
+  **`SOLID_BLOCK` is pinned concretely**: 16×16 on `gameboy`, four horizontal bands in index order `0, 2, 1, 3`. This is the only shape that yields zero warnings — it uses all four indices (so no `unused-palette-entry`) and places no sub-threshold pair orthogonally adjacent (0↔2 Δ 0.32, 2↔1 Δ 0.254, 1↔3 Δ 0.334). "Zero warnings" is a property of the palette *and* the sprite, not the sprite alone: every bundled 16-colour palette carries 15–25 low-contrast pairs.
 
-`metrics.symmetryScore` = fraction of non-transparent cells whose mirror about the **vertical centre axis** holds the same index. Reported, never an error.
+  Fixtures needing a contrived palette inline a `palette: { id, colors }` literal. `lint()` must therefore read `doc.palette.colors` and **never** `getPalette(doc.palette.id)`, which would throw.
 
-Relative luminance uses the standard sRGB formula: linearize each channel (`c <= 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4`), then `0.2126R + 0.7152G + 0.0722B`.
-
-**Steps:**
-
-- [ ] **3.1** Write `tests/fixtures/sprites.ts` exporting hand-built `SpriteDoc` fixtures: `SOLID_BLOCK` (no warnings), `ONE_ORPHAN`, `DIAGONAL_ONLY` (must still be an orphan), `HORIZONTAL_GAP`, `VERTICAL_GAP`, `LOW_CONTRAST_PAIR`, `PERFECT_MIRROR`, `FULLY_ASYMMETRIC`.
-- [ ] **3.2** Write `tests/main/lint.test.ts` **first**: one test per code asserting the exact `cells` array; `DIAGONAL_ONLY` yields an orphan (the definition's sharp edge); `low-contrast` on a sprite using the same near-luminance pair in 30 places reports **one** warning; `PERFECT_MIRROR` scores 1.0 and `FULLY_ASYMMETRIC` scores < 0.2; `SOLID_BLOCK` yields zero warnings of every code.
-- [ ] **3.3** Run. Expected: FAIL.
-- [ ] **3.4** Implement `src/main/lint.ts`.
-- [ ] **3.5** Run. Expected: PASS.
-- [ ] **3.6** Commit.
+- [ ] **3.2** Write `tests/main/lint.test.ts` first: one test per code asserting exact `cells`, `indices` and **cardinality**; `DIAGONAL_ONLY` yields an orphan (the definition's sharp edge); a sprite with 30 adjacent low-contrast pairs of the same two indices yields **one** warning; `SOLID_BLOCK` yields zero warnings of every code; `BLANK` yields `symmetryScore === 1` and `coverage === 0`; `PERFECT_MIRROR` scores 1.0 and `FULLY_ASYMMETRIC` under 0.2.
+- [ ] **3.3** Run. FAIL. **3.4** Implement. **3.5** Run. PASS. **3.6** Commit.
 
 **Acceptance criteria:**
 1. `npm test` green.
-2. A cell attached only diagonally is reported as `orphan-pixel` — reviewer runs `DIAGONAL_ONLY` and confirms.
-3. `low-contrast` deduplicates by index pair: reviewer builds a sprite with 30 adjacent low-contrast cell pairs and confirms exactly one warning.
-4. `lint()` imports nothing from `ollama.ts` and performs no I/O.
-5. Every warning code in the spec table is emitted by at least one test; no code outside the table is ever emitted.
-6. Only Wave 3 whitelist files touched.
+2. A diagonally-attached cell is reported as `orphan-pixel` — reviewer runs `DIAGONAL_ONLY`.
+3. `SOLID_BLOCK` yields **zero** warnings of every code, including `low-contrast` despite hundreds of same-index adjacencies.
+4. `BLANK` yields `symmetryScore === 1`, not `NaN`.
+5. `low-contrast` deduplicates per index pair and carries the pair in `indices`.
+6. Every fixture export is a `SpriteDocSchema.parse` return value — reviewer greps for `: SpriteDoc =` and finds none.
+7. `lint()` performs no I/O and never calls `getPalette`.
+8. Only Wave 3 whitelist files touched.
 
 ---
 
 ## Wave 4 — `main/render.ts`
 
-**Goal:** Grid → PNG, at a scale factor, with an optional coordinate overlay for the critic.
+**Goal:** Grid → PNG, nearest-neighbour, at a scale factor.
 
-**Interfaces produced:**
+**Interfaces produced:** `export function toPng(doc: SpriteDoc, scale: number): Buffer`
 
-```ts
-export function toPng(doc: SpriteDoc, scale: number): Buffer
-export function toPngWithGrid(doc: SpriteDoc, scale: number): Buffer
-```
+**`toPngWithGrid` is deleted from the design.** v1 specified it "solely to ground the critic's coordinates", but Wave 7 sends `toPng` plus the raw row text, and spec §4.4's stated mitigation *is* the text grid. It would have shipped untested, unused, with its rule colour and alpha behaviour unspecified.
 
-Nearest-neighbour only — no smoothing, ever. `toPngWithGrid` draws 1px rules every 8 source pixels and is used solely to ground the critic's coordinates.
-
-**Steps:**
-
-- [ ] **4.1** Write `tests/main/render.test.ts` **first**: `toPng(doc, 1)` produces a PNG whose decoded dimensions equal `size`; `toPng(doc, 16)` on a 32×32 yields 512×512; a transparent cell decodes to alpha 0; a cell of index 3 decodes to that palette color exactly (no interpolation) at all 16×16 sub-pixels; `toPng(doc, 0)` throws.
-- [ ] **4.2** Run. Expected: FAIL.
-- [ ] **4.3** Implement `src/main/render.ts` with `pngjs`.
-- [ ] **4.4** Run. Expected: PASS.
-- [ ] **4.5** Add golden-file test: render a fixture at 8×, write to `tests/fixtures/golden/`, assert byte equality on subsequent runs.
-- [ ] **4.6** Commit.
+- [ ] **4.1** Write `tests/main/render.test.ts` first: `toPng(doc, 1)` decodes to `size`; `toPng(doc32, 16)` yields 512×512; a transparent cell decodes to alpha 0; **all 256 sub-pixels of one source cell at 16× carry identical RGBA** (this is what proves nearest-neighbour rather than smoothing); `toPng(doc, 0)` throws.
+- [ ] **4.2** Run. FAIL. **4.3** Implement with `pngjs`. **4.4** Run. PASS.
+- [ ] **4.5** Pin `pngjs` to an **exact** version in `package.json`. A caret range means a minor bump changing deflate parameters silently breaks the golden file during some later wave's `npm install`.
+- [ ] **4.6** Golden-file test: render the 32×32 fixture at 8×, commit the PNG, assert byte equality. **The test must FAIL if the golden file is absent** — a write-then-compare passes trivially on the run that mints it.
+- [ ] **4.7** Commit.
 
 **Acceptance criteria:**
 1. `npm test` green.
-2. Decoding `toPng(SOLID_BLOCK, 16)` shows every one of the 256 sub-pixels of a source cell carrying the identical RGBA — proves nearest-neighbour, not smoothing. Reviewer verifies by decoding, not by reading code.
-3. Transparent cells decode to alpha 0, not white.
-4. Golden file committed and byte-stable across two consecutive runs.
-5. Only Wave 4 whitelist files touched.
+2. Every one of the 256 sub-pixels of a source cell at 16× carries identical RGBA — reviewer verifies by decoding, not by reading code.
+3. Transparent decodes to alpha 0, not white.
+4. Golden committed and byte-stable across two consecutive runs; deleting it turns the test red rather than regenerating it.
+5. `pngjs` is pinned exactly.
+6. Only Wave 4 whitelist files touched.
 
 ---
 
-## Wave 5 — `main/ollama.ts` + `main/models.ts`
+## Wave 5 — `main/ollama.ts` + `main/models.ts` + the stub
 
-**Goal:** The single HTTP boundary, plus the role registry backing the model pickers.
+**Goal:** The single HTTP boundary, the role registry, and **the stub that Waves 6–9 depend on**.
 
-**Interfaces produced:**
+Interfaces are defined in spec §6.9. `ChatMessage.tool_calls` is not optional decoration — without it the Wave 8 revise loop cannot continue a tool conversation at all.
+
+**`StubScript` is pinned here, literally.** v1 named it "the load-bearing test fixture for Waves 6–9" and never defined it, so four waves would have asserted against a recording surface with no declared shape:
 
 ```ts
-export interface ChatMessage { role: "system" | "user" | "assistant" | "tool"; content: string; tool_call_id?: string }
-export interface ToolDef { name: string; description: string; parameters: Record<string, unknown> }
-export interface ToolCall { id: string; name: string; arguments: Record<string, unknown> }
-export interface ChatTurn { content: string; toolCalls: ToolCall[] }
-
-export interface OllamaClient {
-  listModels(): Promise<string[]>
-  generate(req: { model: string; system?: string; prompt: string; options?: Record<string, unknown>; signal?: AbortSignal }): Promise<string>
-  vision(req: { model: string; system?: string; prompt: string; images: Buffer[]; signal?: AbortSignal }): Promise<string>
-  chatWithTools(req: { model: string; messages: ChatMessage[]; tools: ToolDef[]; signal?: AbortSignal }): Promise<ChatTurn>
+export interface RecordedCall {
+  method: "generate" | "vision" | "chatWithTools" | "listModels"
+  model: string; system?: string; prompt?: string
+  images?: Buffer[]; messages?: ChatMessage[]; tools?: ToolDef[]
+  options?: Record<string, unknown>; format?: string
 }
-export function createOllamaClient(baseUrl?: string): OllamaClient   // default http://localhost:11434
-export class OllamaUnreachableError extends Error { constructor(public endpoint: string) }
-
-// src/main/models.ts
-export interface ModelRegistry {
-  list(): Promise<string[]>
-  roles(): { generator: string; critic: string }
-  bind(role: "generator" | "critic", model: string): void
+export interface StubScript {
+  generate?: string[]          // consumed in order; the last is reused when exhausted
+  vision?: string[]
+  chatWithTools?: ChatTurn[]
+  models?: string[]
 }
-export function createModelRegistry(client: OllamaClient, cfg: HarnessConfig): ModelRegistry
+export interface StubClient extends OllamaClient {
+  calls: RecordedCall[]
+  reset(): void
+}
+export function createStubClient(script: StubScript): StubClient
 ```
 
-`tests/stubs/ollama.ts` exports `createStubClient(script: StubScript): OllamaClient` — a scripted client returning canned responses in order and recording every request. **This stub is the load-bearing test fixture for Waves 6–9.**
+Waves 6–9 may **modify** this file to extend the script surface — they are in its Modified column precisely so that discovering a missing capability is a normal edit rather than an escalation.
 
-**Steps:**
-
-- [ ] **5.1** Write `tests/stubs/ollama.ts`.
-- [ ] **5.2** Write `tests/main/ollama.test.ts` **first**, against a local `http.createServer` fixture (not a mock of `fetch`): `generate` posts to `/api/generate` with `stream: false`; `vision` base64-encodes images into the `images` array; `listModels` parses `/api/tags`; a connection refusal throws `OllamaUnreachableError` naming the endpoint; an `AbortSignal` cancels an in-flight request.
-- [ ] **5.3** Run. Expected: FAIL.
-- [ ] **5.4** Implement `src/main/ollama.ts`.
-- [ ] **5.5** Write `tests/main/models.test.ts`: `roles()` returns config defaults; `bind` changes them; `list()` delegates to the client.
-- [ ] **5.6** Implement `src/main/models.ts`. Run all. Expected: PASS.
-- [ ] **5.7** Write the opt-in live smoke test `tests/live/smoke.test.ts` asserting only that a real `qwen3:8b` call returns a non-empty string. Add the `test:live` script to `package.json`. **Amendment P1:** `vitest.config.ts` is not in this wave's whitelist and its `include` glob is `tests/**/*.test.ts`, so this file would otherwise run during default `npm test`. Guard it with an in-file `describe.skipIf(!process.env.LIVE)` rather than a config change — the guard belongs with the test regardless, since it documents its own precondition.
-- [ ] **5.8** Run `npm run test:live` once; save the raw output to `docs/superpowers/specs/captures/2026-07-28-wave-5-live-smoke.txt`. Commit.
+- [ ] **5.1** Write `tests/stubs/ollama.ts` to the shape above.
+- [ ] **5.2** Write `tests/main/ollama.test.ts` first, against a real local `http.createServer` fixture (not a `fetch` mock): `generate` posts `/api/generate` with `stream:false`; `vision` base64-encodes into `images` and forwards `options`/`format`; **`chatWithTools` posts `/api/chat`, marshals the tool array, and maps `message.tool_calls` to `ChatTurn.toolCalls` with `id`, `name` and parsed `arguments`** — this is Wave 8's only model path and the highest wire-format risk, and v1 left it untested; `listModels` parses `/api/tags`; connection refusal throws `OllamaUnreachableError` naming the endpoint; an `AbortSignal` cancels in flight and surfaces `OllamaTimeoutError(model, elapsedMs)` (the server fixture can simply hang).
+- [ ] **5.3** Run. FAIL. **5.4** Implement `ollama.ts`.
+- [ ] **5.5** Write `tests/main/models.test.ts`: `roles()` returns config defaults; **`bind()` writes through to the live `HarnessConfig.models`** — not to registry-local state, or the pipeline never sees the change *and* the config recorded in history names the wrong model, defeating the whole point of §6.8; `list()` delegates.
+- [ ] **5.6** Implement `models.ts`. Run all. PASS.
+- [ ] **5.7** Write `tests/live/smoke.test.ts`, guarded with an in-file `describe.skipIf(!process.env.LIVE)` — `vitest.config.ts` is not in this whitelist and its include glob would otherwise run it during `npm test`. Add the `test:live` script.
+- [ ] **5.8** Run `npm run test:live` once; save raw output to `captures/2026-07-28-wave-5-live-smoke.txt`. Commit.
 
 **Acceptance criteria:**
-1. `npm test` green and **does not** require Ollama running — reviewer confirms by stopping Ollama and re-running.
-2. `npm run test:live` passes with Ollama running, and the capture file exists in `git status --short` with real model output.
-3. `OllamaUnreachableError` names the exact endpoint URL.
-4. Grepping `src/` for `fetch(`, `http.request`, or `axios` outside `ollama.ts` returns zero hits.
-5. Only Wave 5 whitelist files touched.
+1. `npm test` green **with Ollama stopped** — reviewer confirms by stopping it.
+2. `npm run test:live` passes with Ollama running; capture committed with real model output.
+3. `chatWithTools` round-trips a tool call through the HTTP fixture — asserted, not assumed.
+4. `bind("critic", m)` is observable in the `HarnessConfig` a subsequent `run` would receive.
+5. `OllamaTimeoutError` carries the model and elapsed ms.
+6. Grepping `src/` for `fetch(`, `http.request` or `axios` outside `ollama.ts` returns zero hits.
+7. Only Wave 5 whitelist files touched.
 
 ---
 
 ## Wave 6 — `main/draft.ts`
 
-**Goal:** Prompt → generator → repaired `SpriteDoc`, with retry above threshold.
-
-**Interfaces produced:**
+**Goal:** Prompt → generator → repaired `SpriteDoc`.
 
 ```ts
 export function buildDraftPrompt(input: { prompt: string; size: Size; palette: Palette }): { system: string; user: string }
 export function parseDraft(raw: string, size: Size, palette: Palette):
   { grid: Grid; intent: Intent; repairs: number; repairedRows: number[] }
-export async function draft(
-  deps: { client: OllamaClient },
-  input: { prompt: string; size: Size; paletteId: string },
-  cfg: HarnessConfig
-): Promise<SpriteDoc>
+export async function draft(deps: { client: OllamaClient }, input: { prompt; size; paletteId }, cfg: HarnessConfig): Promise<SpriteDoc>
 export class DraftRejectedError extends Error { constructor(public repairs: number, public raw: string) }
 ```
 
-The draft system prompt is prefixed `/no_think`, states the encoding rules, gives the palette as an indexed table, and includes two short worked examples. `parseDraft` tolerates fenced code blocks and prose around the JSON.
+Four corrections from the audit:
 
-**Amendment P8 — the threshold is a ratio, and it is not bounded by 1.0.** Per spec amendment A5, compute `repairs / (w × h) > cfg.repairRejectThreshold`. `meta.repairs` can exceed the cell count: 100 rows returned for a 16×16 canvas charges 1344 repairs against 256 cells (525%) even when every surviving row is pristine. Do not write the check as a percentage clamped to 100, and do not assume `repairs <= w*h`.
+- **`normalize` takes four arguments.** Pass `palette.colors.length`. (v1's plan text still showed the 3-argument palette-blind version and its literal body — corrected in the Wave 2 section above.)
+- **The threshold is an unbounded ratio**: `repairs / (w × h) > cfg.repairRejectThreshold`. `repairs` can exceed the cell count — 100 rows on a 16×16 canvas charges 1344 against 256.
+- **`parseDraft` never throws.** The prompt must require `{ intent: {subject, …}, rows: [...] }`. Unparseable output yields `rows: []` and `intent: { subject: input.prompt }`; `normalize` then charges `w × h` repairs, ratio 1.0, routing into the existing retry path. v1 left this undefined, so a prose-only response escaped the state machine as an unhandled rejection.
+- **Palette colors are `readonly`** (frozen singletons). Copy when building the doc: `colors: [...palette.colors]`.
 
-**Amendment P9 — palettes are `readonly`.** `palettes.ts` exposes `colors: readonly string[]` (they are frozen singletons), while `PaletteRefSchema` infers `string[]`. Copy when building a `SpriteDoc`: `colors: [...palette.colors]`. Aliasing will fail `tsc`.
-
-**Steps:**
-
-- [ ] **6.1** Write `tests/main/draft.test.ts` **first**, driving `draft()` with the Wave 5 stub: a clean response yields `repairs === 0`; a response with three short rows yields the right `repairs` count and a valid doc; a response exceeding `repairRejectThreshold` triggers **exactly one** retry (assert the stub recorded 2 calls) and the retry prompt contains the misalignment description; a second over-threshold response throws `DraftRejectedError` carrying the raw output; `buildDraftPrompt` output contains `/no_think` and every palette index with its hex.
-- [ ] **6.2** Run. Expected: FAIL.
-- [ ] **6.3** Implement `src/main/prompts/draft.ts` and `src/main/draft.ts`.
-- [ ] **6.4** Run. Expected: PASS.
-- [ ] **6.5** Commit.
+- [ ] **6.1** Write `tests/main/draft.test.ts` first, driving `draft()` with the Wave 5 stub: clean response → `repairs === 0`; three short rows → correct count **and `meta.repairedRows` naming those exact indices**; over-threshold → exactly one retry (assert `stub.calls.length === 2`) whose prompt **names the defects by kind** ("row 4 used index 9, this palette has 4 colours" is a different instruction from "row 4 was 12 chars"); second over-threshold → `DraftRejectedError` carrying the raw output; a prose-only response routes through the same retry path rather than throwing; `buildDraftPrompt` contains `/no_think`, every palette index with its hex, and the required output shape.
+- [ ] **6.2** Run. FAIL. **6.3** Implement. **6.4** Run. PASS. **6.5** Commit.
 
 **Acceptance criteria:**
 1. `npm test` green.
-2. Retry fires exactly once at `maxDraftRetries: 1` — reviewer asserts the stub's recorded call count is 2, not 3.
-3. `DraftRejectedError` carries the raw model output for debugging.
-4. `meta.repairs` on the produced doc equals `normalize`'s count.
-5. The retry prompt names the specific rows that were malformed.
+2. Retry fires exactly once at `maxDraftRetries: 1` — `stub.calls.length === 2`, not 3.
+3. **`meta.repairs` AND `meta.repairedRows` both equal `normalize`'s outputs.** A doc with `repairs > 0` and `repairedRows: []` is a defect — `repairedRows` has a `[]` default, so a `draft()` that forgets it parses clean while claiming nothing was repaired, and `row-repaired` would then never fire in production.
+4. A prose-only model response does not throw; it retries and then raises `DraftRejectedError`.
+5. Every model call is wrapped in an `AbortController` armed with the area-scaled `callTimeoutMs`.
 6. Only Wave 6 whitelist files touched.
 
 ---
 
 ## Wave 7 — `main/critique.ts`
 
-**Goal:** Vision critique with region clamping and the two-tier confidence filter.
-
-**Interfaces produced:**
+**Goal:** Vision critique with repair, clamping, and the two-tier confidence filter. Spec §6.4 is the contract.
 
 ```ts
 export function buildCritiquePrompt(doc: SpriteDoc, lint: LintReport): { system: string; user: string }
-export function parseCritique(raw: string, size: Size): CritiqueReport   // clamps regions; drops fully-OOB issues
+export function repairCritique(rawJson: unknown, size: Size): unknown   // BEFORE schema validation
+export function parseCritique(raw: string, size: Size): CritiqueReport
 export function filterIssues(report: CritiqueReport, cfg: HarnessConfig): CritiqueReport
-export async function critique(
-  deps: { client: OllamaClient },
-  doc: SpriteDoc, lintReport: LintReport, cfg: HarnessConfig
-): Promise<CritiqueReport>
+export async function critique(deps, doc, lintReport, cfg): Promise<CritiqueReport>
 ```
 
-**`filterIssues` is given literally** — the two-tier behavior is spec §6.4 and is easy to get subtly wrong:
+`filterIssues` is pinned literally — the two-tier behaviour is easy to invert:
 
 ```ts
 export function filterIssues(report: CritiqueReport, cfg: HarnessConfig): CritiqueReport {
@@ -429,22 +450,22 @@ export function filterIssues(report: CritiqueReport, cfg: HarnessConfig): Critiq
 }
 ```
 
-The critic call sends **both** the upscaled PNG (`toPng(doc, cfg.criticUpscale)`) and the raw row text, per spec §4.4.
+**Repair runs on the raw JSON before validation** (§6.4's table). `Coord` is non-negative, so a partly-valid region like `[-5,-5,3,3]` — the most common VLM error — would otherwise fail the schema, consume the single reprompt, and degrade the whole report to zero issues.
 
-**Steps:**
+The call sends the upscaled PNG at `scale = max(1, floor(cfg.criticTargetPx / size.w))`, the raw row text, and `format: "json"`.
 
-- [ ] **7.1** Write `tests/main/critique.test.ts` **first**: an issue at `confidence: 0.2` with `confidenceFloor: 0.3` is dropped; an issue at `confidence: 0.9, suggestConfidence: 0.4` is **kept** with `suggest === ""`; an issue at `0.9/0.6` keeps its suggest text; a region `[30, 30, 99, 99]` on a 32×32 clamps to `[30,30,31,31]`; a region entirely outside is dropped; non-JSON model output triggers **exactly one** reprompt whose message contains the validation error; a second invalid response returns an empty-issue report rather than throwing; `critique()` passes exactly one image and the row text to the client.
-- [ ] **7.2** Run. Expected: FAIL.
-- [ ] **7.3** Implement `src/main/prompts/critique.ts` and `src/main/critique.ts`.
-- [ ] **7.4** Run. Expected: PASS.
-- [ ] **7.5** Commit.
+- [ ] **7.1** Write `tests/main/critique.test.ts` first: `confidence 0.2` with floor `0.3` → dropped; **`confidence 0.9 / suggestConfidence 0.4` → KEPT with `suggest === ""`** (dropping the whole issue here is the defect this test exists to catch); `0.9/0.6` keeps its suggest; region `[30,30,99,99]` on 32×32 clamps; `[-5,-5,3,3]` clamps rather than failing validation; reversed regions normalize; entirely-outside drops; missing `id` is synthesized rather than failing the report; non-JSON → exactly one reprompt containing the validation error; second failure → `degraded: true`, `overall: null`, `issues: []` — never a throw and never an invented score; `critique()` sends exactly one image plus the row text plus `format: "json"`.
+- [ ] **7.2** Run. FAIL. **7.3** Implement. **7.4** Run. PASS.
+- [ ] **7.5** Capture one real critic response to `captures/2026-07-28-wave-7-critic-sample.txt` and use it as a contract-test fixture, so the suite fails when real models drift. Commit.
 
 **Acceptance criteria:**
 1. `npm test` green.
-2. The `0.9 / 0.4` case keeps the issue and empties `suggest` — reviewer executes this exact case. (Dropping the whole issue here is the defect this check exists to catch.)
-3. Two consecutive invalid critic responses yield a zero-issue report, never a throw — a broken critic must not destroy a valid sprite.
-4. `critique()` sends both an image and the row text; reviewer asserts on the stub's recorded request.
-5. Only Wave 7 whitelist files touched.
+2. The `0.9 / 0.4` case keeps the issue and empties `suggest`.
+3. A critic response missing only `id` produces a valid report, not a degraded one.
+4. Two unparseable responses yield `degraded: true` with `overall: null` — a broken critic must not destroy a valid sprite, and must not be recorded as a score.
+5. Negative-coordinate regions clamp rather than failing validation.
+6. Real critic output captured and committed.
+7. Only Wave 7 whitelist files touched.
 
 ---
 
@@ -452,273 +473,249 @@ The critic call sends **both** the upscaled PNG (`toPng(doc, cfg.criticUpscale)`
 
 **Goal:** The bounded agentic loop — the one place the model drives.
 
-**Interfaces produced:**
-
 ```ts
 export const REVISE_TOOLS: ToolDef[]      // place_pixel, fill_row, done
-export async function revise(
-  deps: { client: OllamaClient },
+export async function revise(deps: { client; onTurn?: (n: number) => void },
   doc: SpriteDoc, issues: Issue[], cfg: HarnessConfig
-): Promise<{ doc: SpriteDoc; turns: number; hitCap: boolean; summary: string }>
+): Promise<{ grid: Grid; turns: number; hitCap: boolean; summary: string }>
 ```
 
-An invalid tool call returns an error **string** to the model as a tool result — never a throw — and still counts against `maxReviseTurns`.
+**`revise` returns a `Grid`, not a `SpriteDoc`.** The pipeline owns `meta` construction (spec §7.5) — otherwise a revised doc silently inherits the draft's `id`, `round`, `createdAt` and `parentId: null`, so every round shares one identity and the lineage field is permanently inert.
 
-**Amendment P10 — coerce `index` before dispatching.** §6.6 types `place_pixel`'s index as `number | "."`, but a model routinely emits JSON `"3"` as a string. Uncoerced, that reaches `indexChar` and returns `GridError("bad-char")` — a technically correct rejection of well-formed intent, which burns turns against the cap. Coerce numeric strings to numbers in the tool handler before validating. `GridError` codes from `indexChar`: non-integer → `bad-char`, integer outside 0–15 → `off-palette`.
+Four behaviours the audit pinned:
 
-**Steps:**
+- Append the assistant's turn **including `tool_calls`** before the tool results, or the model re-issues calls it already made.
+- An invalid tool call returns an error **string**, never throws, and counts against the cap.
+- **Numeric strings are coerced** before validation — a model emitting `"3"` is well-formed intent.
+- **A turn with zero tool calls counts against the cap** and injects a nudge naming the three tools. This is the most common qwen3 tool-loop behaviour; counting only tool-firing turns spins forever on an identical message array.
 
-- [ ] **8.1** Write `tests/main/revise.test.ts` **first**: a scripted `place_pixel` then `done` applies one pixel and reports `turns === 2, hitCap === false`; an out-of-bounds `place_pixel` returns a tool result containing `out-of-bounds` and the loop continues; a script that never calls `done` stops at `maxReviseTurns` with `hitCap === true` and keeps the edits that landed; `maxReviseTurns: 2` is honoured exactly; `fill_row` with `x0 > x1` returns an error result without throwing; an off-palette index on a `gameboy` doc returns an error result.
-- [ ] **8.2** Run. Expected: FAIL.
-- [ ] **8.3** Implement `src/main/prompts/revise.ts` and `src/main/revise.ts`.
-- [ ] **8.4** Run. Expected: PASS.
-- [ ] **8.5** Commit.
+Binds to `models.generator`; prompt prefixed `/no_think`. Calls `onTurn` per turn so Wave 9 can emit live progress — v1's longest stage emitted nothing.
+
+- [ ] **8.1** Write `tests/main/revise.test.ts` first: scripted `place_pixel` then `done` → one pixel changed, `turns === 2`, `hitCap === false`; out-of-bounds `place_pixel` → tool result containing `out-of-bounds`, loop continues; `"3"` as a string is accepted; a script that never calls `done` → stops at `maxReviseTurns` with `hitCap === true`, keeping landed edits; `maxReviseTurns: 2` honoured exactly; a zero-tool-call turn counts and nudges; `fill_row` with `x0 > x1` errors without throwing; off-palette on a gameboy doc errors; `onTurn` fires once per turn; the assistant message appended to the transcript carries `tool_calls`.
+- [ ] **8.2** Run. FAIL. **8.3** Implement. **8.4** Run. PASS. **8.5** Commit.
 
 **Acceptance criteria:**
 1. `npm test` green.
-2. An invalid tool call never throws — reviewer confirms the loop continues and the model receives an error string.
-3. `maxReviseTurns` is honoured exactly; setting it to 2 produces at most 2 model turns.
-4. Hitting the cap without `done()` still returns the partially-edited doc.
-5. Every mutation goes through `shared/grid.ts` — grepping `revise.ts` for direct string splicing on rows returns zero hits.
-6. Only Wave 8 whitelist files touched.
+2. An invalid tool call never throws; the loop continues and the model receives an error string.
+3. A zero-tool-call turn advances the counter — reviewer scripts three of them against `maxReviseTurns: 2` and confirms termination.
+4. `maxReviseTurns` honoured exactly.
+5. The transcript's assistant turns carry `tool_calls` — reviewer asserts on the stub's recorded messages.
+6. `revise` returns a `Grid`; grepping for `meta` construction in `revise.ts` returns nothing.
+7. Only Wave 8 whitelist files touched.
 
 ---
 
 ## Wave 9 — `main/history.ts` + `main/pipeline.ts`
 
-**Goal:** The state machine. **This is the wave that most needs an independent reviewer.**
-
-**Interfaces produced:**
+**Goal:** The state machine. **The wave that most needs an independent reviewer**, and the one whose v1 design was most wrong.
 
 ```ts
-// history.ts
-export function createHistory(sessionId: string, cfg: HarnessConfig): SessionHistory
-export function appendRound(h: SessionHistory, r: Round): SessionHistory
-export async function saveHistory(h: SessionHistory, dir: string): Promise<string>
-
-// pipeline.ts
-export type PipelineState = "IDLE" | "DRAFTING" | "LINTING" | "CRITIQUING"
-                          | "REVISING" | "AWAITING_USER" | "DONE" | "FAILED"
-export type StopReason = "no-high-severity" | "round-cap" | "empty-diff"
-export type PipelineEvent =
-  | { type: "state"; state: PipelineState; round: number; detail?: string }
-  | { type: "round"; round: Round }
-  | { type: "stopped"; reason: StopReason }
-  | { type: "error"; message: string }
-export interface PipelineDeps { client: OllamaClient; onEvent: (e: PipelineEvent) => void }
-export async function run(deps: PipelineDeps,
-  input: { prompt: string; size: Size; paletteId: string }, cfg: HarnessConfig): Promise<SessionHistory>
-export async function applyFeedback(deps: PipelineDeps,
-  history: SessionHistory, feedback: string, roundIndex: number, cfg: HarnessConfig): Promise<SessionHistory>
-```
-
-**Two behaviors given literally**, because both are spec rules an implementer would plausibly invert:
-
-```ts
-// Stop conditions evaluate on the FILTERED list (spec §7.2).
-const filtered = filterIssues(rawCritique, cfg)
-const highSev = filtered.issues.filter(i => i.severity === "high")
-if (cfg.stopOnNoHighSeverity && highSev.length === 0) return stop("no-high-severity")
-if (round >= cfg.maxRounds) return stop("round-cap")
-
-// User feedback is a synthetic high-severity issue re-entering at REVISING (spec §7.3).
-const synthetic: Issue = {
-  id: `user-${round}`, region: [0, 0, doc.size.w - 1, doc.size.h - 1],
-  severity: "high", issue: feedback, suggest: "",
-  confidence: 1.0, suggestConfidence: 0.0,
+export interface PipelineDeps {
+  client: OllamaClient
+  onEvent: (e: PipelineEvent) => void
+  persist?: (h: SessionHistory) => Promise<void>
 }
+export async function run(deps, input: { prompt; size; paletteId }, cfg): Promise<SessionHistory>
+export async function applyFeedback(deps, history, feedback: string, roundIndex: number, cfg): Promise<SessionHistory>
+export async function accept(history: SessionHistory, roundIndex: number): Promise<SessionHistory>
 ```
 
-**Steps:**
+Spec §7.1 is the contract. The five things v1 got wrong, each now a required test:
 
-- [ ] **9.1** Write `tests/main/history.test.ts`: `createHistory` embeds `cfg` verbatim; `appendRound` computes `diffFromPrev` against the previous round; `saveHistory` writes parseable JSON round-tripping through `SessionHistorySchema`.
-- [ ] **9.2** Write `tests/main/pipeline.test.ts` **first**, entirely against the stub client. One test per behavior: the happy path emits `DRAFTING → LINTING → CRITIQUING → AWAITING_USER` and stops with `no-high-severity`; a critic that always returns a high-severity issue stops at `round-cap` after exactly `maxRounds`; a revise stage that changes nothing stops with `empty-diff` **before** the round cap; a high-severity issue at `confidence: 0.1` does **not** keep the loop running (filter-then-evaluate ordering); `applyFeedback` injects a synthetic issue with `confidence === 1.0` and re-enters at `REVISING`; a `DraftRejectedError` transitions to `FAILED` with the raw output in history; two consecutive invalid critiques advance to `AWAITING_USER`; `history.config` equals the passed config.
-- [ ] **9.3** Run. Expected: FAIL.
-- [ ] **9.4** Implement `src/main/history.ts` then `src/main/pipeline.ts`.
-- [ ] **9.5** Run. Expected: PASS.
-- [ ] **9.6** Save the emitted event sequence for the happy path to `docs/superpowers/specs/captures/2026-07-28-wave-9-event-trace.txt`. Commit.
+1. **The round is snapshotted at the top of every iteration**, after `CRITIQUING`, before any revision. v1 snapshotted only on the `REVISING` exit, so a run converging on its first critique returned `rounds: []`.
+2. **`empty-diff` is evaluated as `diff(docBefore, docAfter)` on the revise transition** — never by reading a stored `diffFromPrev`, which is `null` on round 1.
+3. **Feedback re-enters at `REVISING`**, and the resulting round's `parentId` points at the round the user was looking at, which may not be the last.
+4. **`diffFromPrev` is computed against the parent**, not the array-previous — `applyFeedback` may branch.
+5. **The pipeline constructs every `meta`** (§7.5): fresh `id`/`createdAt`, `parentId`, current `round`, and `repairs: 0`/`repairedRows: []` on derived docs.
+
+Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is round 1 and `maxRounds` bounds critiques; an empty filtered issue list skips `REVISING` unconditionally; two unparseable critiques stop with `critic-failed`, never `no-high-severity`.
+
+- [ ] **9.1** Write `tests/main/history.test.ts`: `createHistory` embeds `cfg` verbatim; `appendRound` diffs against the **parent**; `saveHistory` round-trips through `SessionHistorySchema`.
+- [ ] **9.2** Write `tests/main/pipeline.test.ts` first, entirely against the stub. One test per behaviour: **the happy path produces `rounds.length === 1` and `stopReason === "no-high-severity"`** (v1's test asserted only the event sequence and would have passed against an empty history — assert the rounds); an always-high-severity critic stops at `round-cap` after exactly `maxRounds` critiques; a no-op revise stops with `empty-diff` **before** the cap; **round 1 never stops with `empty-diff`**; a high-severity issue at `confidence: 0.1` does not keep the loop running; two unparseable critiques stop with `critic-failed` and `outcome` is still `"completed"`; `applyFeedback` injects `confidence === 1.0`, records `userFeedback`, and sets `parentId` to the edited round; `DraftRejectedError` → `finalState: "FAILED"`, `outcome: "failed"`, raw output in `draftFailures`; a derived doc has a fresh `id` and `repairedRows: []`; `persist` is called once per round; `run()` rejects a config with `maxRounds: 0`.
+- [ ] **9.3** Run. FAIL. **9.4** Implement `history.ts` then `pipeline.ts`. **9.5** Run. PASS.
+- [ ] **9.6** Save the happy-path event trace to `captures/2026-07-28-wave-9-event-trace.txt`. Commit.
 
 **Acceptance criteria:**
-1. `npm test` green; pipeline suite covers all three stop reasons with a dedicated test each.
-2. **Filter-then-evaluate ordering is proven:** a critic returning one `severity: "high", confidence: 0.1` issue must stop with `no-high-severity` on round 1. Reviewer executes this case. Inverting the order is the defect this check exists to catch.
-3. `empty-diff` fires before `round-cap` when revise is a no-op.
-4. `applyFeedback` produces an issue with `confidence === 1.0` and `severity === "high"`.
-5. The whole suite runs with Ollama stopped.
-6. Event-trace capture exists in `git status --short` and shows the real state sequence.
-7. Only Wave 9 whitelist files touched.
+1. `npm test` green; every stop reason has a dedicated test.
+2. **A run converging on its first critique yields `rounds.length === 1`** — reviewer executes this and inspects the array, not the event stream.
+3. `Round.lint` and `Round.critique` describe the **same** doc as `Round.doc` — reviewer verifies the lint report matches a fresh `lint(round.doc)`.
+4. Round 1 does not stop with `empty-diff`.
+5. Filter-then-evaluate: one `severity: "high", confidence: 0.1` issue stops with `no-high-severity` on round 1.
+6. Two unparseable critiques stop with `critic-failed`, not `no-high-severity`.
+7. Derived docs carry a fresh `id`, correct `parentId`, and `repairedRows: []`.
+8. The whole suite runs with Ollama stopped.
+9. Event trace committed showing the real state sequence.
+10. Only Wave 9 whitelist files touched.
 
 ---
 
-## Wave 10 — Electron shell + IPC
+## Wave 10 — Electron shell, build, IPC, Playwright
 
-**Goal:** The app boots and the renderer can reach the pipeline. Minimal UI — a button and a `<pre>`.
+**Goal:** The app boots, the renderer reaches the pipeline, and there is a **build**. Minimal UI.
 
-**Interfaces produced:**
+**Wave 10 must first make the project buildable at all.** v1 had no build step in 14 waves and no `main` field; electron-vite throws `No entry point found for electron app`, and Playwright's `_electron.launch()` attaches to a built app rather than a dev server.
+
+- `package.json` gains `"main": "./out/main/index.mjs"`, `"dev": "electron-vite dev"`, `"build": "electron-vite build"`.
+- **The preload must build as CJS.** `"type": "module"` makes electron-vite emit ESM for preload too, and Electron will not load an ESM preload in a sandboxed renderer — `window.api` is `undefined` and the symptom points at the wrong layer entirely. Pin `output: { format: "cjs", entryFileNames: "[name].cjs" }` and point `webPreferences.preload` at `index.cjs`. **Do not "fix" this with `sandbox: false`.**
+- Playwright moves here from Wave 11, because Wave 10's own evidence requirement is a screenshot and an implementer has no other way to take one.
 
 ```ts
-// src/preload/index.ts exposes window.api
 interface Api {
   listModels(): Promise<string[]>
+  getModels(): Promise<{ generator: string; critic: string }>
+  bindModel(role: "generator" | "critic", model: string): Promise<void>
+  getConfig(): Promise<HarnessConfig>
   getPalettes(): Promise<Palette[]>
-  run(input: { prompt: string; size: Size; paletteId: string }): Promise<SessionHistory>
-  applyFeedback(feedback: string, roundIndex: number): Promise<SessionHistory>
+  run(input: { prompt; size; paletteId }): Promise<Result<SessionHistory>>
+  applyFeedback(feedback: string, roundIndex: number): Promise<Result<SessionHistory>>
+  accept(roundIndex: number): Promise<Result<SessionHistory>>
+  setPixel(roundIndex: number, x: number, y: number, ch: string): Promise<Result<{ doc: SpriteDoc; lint: LintReport }>>
+  exportPng(roundIndex: number, scale: 1|4|8|16): Promise<Result<string>>
+  getSessionPath(): Promise<string>
   onEvent(cb: (e: PipelineEvent) => void): () => void
-  exportPng(roundIndex: number, scale: number): Promise<string>
 }
+type Result<T> = { ok: true; value: T } | { ok: false; code: string; message: string; endpoint?: string }
 ```
 
-Context isolation on, `nodeIntegration` off. The preload exposes exactly this surface and nothing else.
+Every addition here closes an audit blocker: `bindModel`/`getModels` (model pickers had no wire), `accept` (`DONE` was unreachable), `setPixel` (hand edits never reached main, so exports silently omitted them), `getConfig` (the filmstrip needs `maxRounds`), `getSessionPath` (Wave 14 must open the session JSON).
 
-**Steps:**
+**`Result<T>` rather than rejection** — `ipcMain.handle` serializes a rejection into a plain `Error` and destroys its fields, discarding the very `endpoint` that spec §9's unreachable-Ollama message is about.
 
-- [ ] **10.1** Write `electron.vite.config.ts` for main/preload/renderer.
-- [ ] **10.2** Write `tests/main/ipc.test.ts` **first**: every `Api` method maps to a registered `ipcMain.handle` channel; the channel list is exactly the `Api` keys (no extras).
-- [ ] **10.3** Run. Expected: FAIL.
-- [ ] **10.4** Implement `src/main/index.ts`, `src/main/ipc.ts`, `src/preload/index.ts`, and a minimal `src/renderer/App.tsx` with a prompt input, a Generate button, and a `<pre>` dumping the returned rows.
-- [ ] **10.5** Run `npm run dev`, generate one sprite against real Ollama, screenshot to `docs/superpowers/specs/screenshots/2026-07-28-wave-10-boot.png`.
+**Main owns the session.** `ipc.ts` holds a module-level `currentSession: SessionHistory | null`, written by `run`/`applyFeedback`/`accept`/`setPixel`. Every round-indexed method resolves against it.
+
+- [ ] **10.1** `package.json`: `main`, `dev`, `build`, `@playwright/test`. `electron.vite.config.ts`: three-target config with the CJS preload pin.
+- [ ] **10.2** Write `tests/main/ipc.test.ts` first (with `vi.mock("electron")` — outside Electron, `require("electron")` resolves to a path string): every `Api` method **except `onEvent`** maps to a registered `ipcMain.handle` channel; `onEvent` maps to one `webContents.send` channel; the union is exactly the `Api` keys. *(v1's test asserted `onEvent` was a `handle` channel, which it can never be — the test failed against a correct implementation.)*
+- [ ] **10.3** Run. FAIL.
+- [ ] **10.4** Implement `src/main/index.ts`, `ipc.ts`, `preload/index.ts`, and a minimal `App.tsx` (prompt, Generate, `<pre>` of rows). **`export-png` registers a handler that throws `not-implemented`** — `src/main/export.ts` is a Wave 13 file, and Wave 10's own test requires every `Api` key registered.
+- [ ] **10.5** `npm run build`, then `e2e/boot.spec.ts` launches Electron, generates one sprite against real Ollama, and captures `screenshots/2026-07-28-wave-10-boot.png` programmatically.
 - [ ] **10.6** Commit.
 
 **Acceptance criteria:**
-1. `npm run dev` opens a window; no console errors.
-2. Screenshot committed showing real generated rows in the `<pre>` — reviewer confirms the file is in `git status --short` and shows actual pixel rows, not an empty box.
-3. `contextIsolation: true` and `nodeIntegration: false` in the `BrowserWindow` config.
-4. The preload exposes exactly the `Api` keys.
-5. `npm test` still green.
-6. Only Wave 10 whitelist files touched.
+1. `npm run build` exits 0 and produces `out/main/index.mjs` and `out/preload/index.cjs`.
+2. `npx playwright test` launches the app; **`window.api` is defined** — the direct check for the ESM-preload trap.
+3. Screenshot committed showing real generated rows, not an empty box.
+4. `contextIsolation: true`, `nodeIntegration: false`, `sandbox` left at its default.
+5. The preload exposes exactly the `Api` keys.
+6. A failed `listModels` returns `{ ok: false, endpoint }` rather than rejecting.
+7. `npm test` still green.
+8. Only Wave 10 whitelist files touched.
 
 ---
 
-## Wave 11 — Canvas + palette + manual editing (visual gate V1)
-
-**Goal:** The pixel grid is real and editable. First visual gate.
-
-**Interfaces produced:**
+## Wave 11 — Canvas, palette, manual editing (visual gate V1)
 
 ```ts
-// src/renderer/state/store.ts
 export interface EditorState {
   history: SessionHistory | null; currentRound: number
   activeIndex: string; activeIssueId: string | null
-  state: PipelineState; stopReason: StopReason | null
+  state: PipelineState; stopReason: StopReason | null; config: HarnessConfig | null
 }
-export function useEditor(): EditorState & { setPixel(x,y): void; selectColor(ch): void; selectRound(i): void }
 ```
 
-**Steps:**
+`PipelineState` and `StopReason` come from `@shared/schema` (moved there in Wave 2c) — never from `@main/pipeline`, which would pull `node:http` into the renderer bundle.
 
-- [ ] **11.1** Install `@playwright/test`; write `playwright.config.ts` targeting Electron via `_electron.launch()`.
-- [ ] **11.2** Write `tests/renderer/Canvas.test.tsx` **first**: a 16×16 doc renders 256 cells; a transparent cell renders the checkerboard class; clicking a cell calls `setPixel` with the right coords and the active index. **Amendment P2:** this needs a DOM. `vitest.config.ts` is not in this wave's whitelist, so install `jsdom` and `@testing-library/react` (both covered by this wave's `package.json` entry) and select the environment with a per-file `// @vitest-environment jsdom` docblock rather than changing the global config — the node default is correct for every other suite and should stay.
-- [ ] **11.3** Run. Expected: FAIL.
-- [ ] **11.4** Implement `Canvas.tsx`, `PaletteBar.tsx`, `store.ts`; wire into `App.tsx`.
-- [ ] **11.5** Run. Expected: PASS.
-- [ ] **11.6** Write `e2e/canvas.spec.ts`: launch Electron, load a fixture doc, click a palette swatch, click a canvas cell, assert the cell's color changed. Capture `docs/superpowers/specs/screenshots/2026-07-28-wave-11-canvas.png`.
+**Manual edits go through `Api.setPixel`.** The renderer sends the edit and receives the updated doc plus a fresh lint report; it does not mutate locally. **An edit to the last round mutates it; an edit to an earlier round appends a new round parented to the one edited** — mutating an earlier round in place would invalidate every later round's `diffFromPrev`, and the filmstrip is defined as replaying those diffs.
+
+**`Canvas.tsx` renders `activeIssueId`'s region with a highlight class.** Wave 12 asserts this behaviour but may not create `Canvas.tsx`, so it is built here.
+
+- [ ] **11.1** State via `useSyncExternalStore` + a module store — no new dependency. Add `jsdom` and `@testing-library/react`; select the environment with a per-file `// @vitest-environment jsdom` docblock, since `vitest.config.ts` is out of whitelist and node is correct for every other suite.
+- [ ] **11.2** Write `tests/renderer/Canvas.test.tsx` first: a 16×16 doc renders 256 cells; a transparent cell carries the empty-cell class; clicking a cell calls `Api.setPixel` with the right coords and active index; a cell inside `activeIssueId`'s region carries the highlight class.
+- [ ] **11.3** Run. FAIL. **11.4** Implement `Canvas.tsx`, `PaletteBar.tsx`, `store.ts`; wire into `App.tsx`. **11.5** Run. PASS.
+- [ ] **11.6** `npm run build && npx playwright test e2e/canvas.spec.ts` — click a swatch, click a cell, assert the colour changed **and that a re-read from main reflects it**. Capture `screenshots/2026-07-28-wave-11-canvas.png`.
 - [ ] **11.7** Commit.
 
 **Acceptance criteria:**
-1. `npm test` and `npx playwright test` both green.
+1. `npm test` and `npm run build && npx playwright test` both green.
 2. E2E screenshot committed showing a painted cell.
-3. Manual edits route through `shared/grid.ts` — grepping the renderer for direct row splicing returns zero hits.
-4. Canvas renders correctly at all three sizes.
-5. **Visual gate V1:** a design-oriented reviewer judges the screenshot against the ruled design `docs/superpowers/specs/design/2026-07-28-editor-layout-b.html` on canvas dominance, checkerboard legibility, and swatch selection affordance. A visual REJECT is remediate-and-rerender.
+3. **A hand edit is visible to main** — reviewer paints, then calls `exportPng` and confirms the edit is present. This is the check that catches the v1 silent-divergence defect.
+4. Canvas renders at all three sizes.
+5. **Visual gate V1** — a design reviewer judges the screenshot against `design/2026-07-28-editor-layout-b.html` on canvas dominance, checkerboard legibility, and swatch affordance.
 6. Only Wave 11 whitelist files touched.
 
 ---
 
-## Wave 12 — Prompt bar, dock, filmstrip, gate, status (visual gate V2)
+## Wave 12 — Full layout (visual gate V2)
 
-**Goal:** The full ratified layout, driving the real pipeline.
-
-**Steps:**
-
-- [ ] **12.1** Write `e2e/loop.spec.ts` **first** (it will fail): run a real generation, assert the filmstrip gains a frame per round, clicking an issue highlights a region, clicking a filmstrip frame changes the canvas, the gate appears at `AWAITING_USER`.
-- [ ] **12.2** Run. Expected: FAIL.
-- [ ] **12.3** Implement `PromptBar`, `ModelPickers`, `CritiqueDock`, `Filmstrip`, `GateBar`, `StatusBar`; compose in `App.tsx`; subscribe to `onEvent` for live state.
-- [ ] **12.4** Run. Expected: PASS.
-- [ ] **12.5** Capture screenshots: `-wave-12-full.png` (populated, mid-loop), `-wave-12-empty.png` (**first-run state: no sprite, empty filmstrip, no dock**), `-wave-12-gate.png` (awaiting user).
+- [ ] **12.1** Write `e2e/loop.spec.ts` first: a real generation adds a filmstrip frame per round; clicking an issue highlights its region; clicking a frame changes the canvas; the gate appears at `AWAITING_USER`; **the dock shows lint output**; **Accept records the round and the status bar reads `DONE`**; the model pickers change `getModels()`.
+- [ ] **12.2** Run. FAIL.
+- [ ] **12.3** Implement `PromptBar`, `ModelPickers`, `CritiqueDock` (critique **and** lint), `Filmstrip`, `GateBar` (feedback, Accept, Export), `StatusBar`; subscribe to `onEvent`.
+  - **The dock renders whenever a critique exists**, including a converged one showing "no high-severity issues" plus the lint block (ruling R2 — the ratified prototype, not v1's spec §8).
+  - Filmstrip pending frames come from `getConfig().maxRounds`.
+  - Status bar reads state and stop reason from `SessionHistory`, so they survive a reload.
+- [ ] **12.4** Run. PASS.
+- [ ] **12.5** Capture `-wave-12-full.png` (populated, mid-loop), `-wave-12-empty.png` (**first-run: no sprite, empty filmstrip, no dock**), `-wave-12-gate.png`.
 - [ ] **12.6** Commit.
 
 **Acceptance criteria:**
-1. `npx playwright test` green.
-2. All three screenshots committed, including the **empty/first-run state** — a design whose depth comes from content collapses when empty, and gating only the happy state is a known failure.
-3. The critique dock is absent when there are no issues, present when there are.
-4. Twin confidence bars render; the `0.91 / 0.40` case is visually distinguishable from `0.91 / 0.95`.
-5. The status bar names the stop reason that actually fired.
-6. **Interaction contract:** every rendered element affords something. A fresh reviewer drives the live app as a first-run user and a returning user and files every dead end. An element that renders but does nothing is a defect.
-7. **Visual gate V2:** design reviewer judges all three screenshots against the ruled design.
+1. `npm run build && npx playwright test` green.
+2. All three screenshots committed **including the empty/first-run state** — a design whose depth comes from content collapses when empty, and gating only the happy state is a known failure mode.
+3. The dock appears whenever a critique exists and shows the lint block.
+4. Twin confidence bars render; `0.91/0.40` is visually distinguishable from `0.91/0.95`.
+5. The status bar names the stop reason that actually fired, read from the persisted history.
+6. **Interaction contract** — a fresh reviewer drives the live app as a first-run user and a returning user and files every dead end. An element that renders but affords nothing is a defect. Model pickers and Accept are the two most likely to be inert.
+7. **Visual gate V2** — design reviewer judges all three screenshots against the ruled design. `-wave-12-empty.png` is judged against **written criteria, not the prototype**, since the prototype has no empty state (it loads with the fox already drawn).
 8. Only Wave 12 whitelist files touched.
 
 ---
 
 ## Wave 13 — PNG export + benchmark runner
 
-**Goal:** The tool produces usable output, and the quality instrument exists.
-
-**Interfaces produced:**
-
 ```ts
 export async function exportPng(doc: SpriteDoc, scale: 1|4|8|16, outPath: string): Promise<string>
-// bench/run.ts — npm run bench -- --prompts bench/prompts.ts --out bench-results/
 ```
 
-`bench/prompts.ts` holds the ten spec §11 eval prompts: flower, dog, sword, tree, house, fox, chest, potion, knight, fish.
+`Api.exportPng` opens `dialog.showSaveDialog` on the main window and resolves to the chosen absolute path, or `""` on cancel. v1 never said where the PNG went; "dialog" appeared zero times in either document.
 
-Bench CSV columns: `prompt, size, palette, generator, critic, repairs, repairPct, rounds, stopReason, orphanCount, paletteUsed, symmetryScore, draftMs, critiqueMs, reviseMs, totalMs`.
+Bench: `"bench": "tsx bench/run.ts"` (add `tsx`; add `bench/**` to `tsconfig.json`'s include, which is otherwise never typechecked). Ten prompts from spec §11, pinned at **`size: 32`, `paletteId: "pico-8"`**.
 
-**Steps:**
+CSV columns: `prompt, size, palette, generator, critic, ok, error, repairs, repairPct, rounds, stopReason, orphanCount, paletteUsed, symmetryScore, draftMs, critiqueMs, reviseMs, totalMs, reviseTurns, hitCap`.
 
-- [ ] **13.1** Write `tests/main/export.test.ts` **first**: `exportPng(doc, 8, path)` writes a 256×256 file for a 32×32 doc; scale 3 is rejected.
-- [ ] **13.2** Run. Expected: FAIL.
-- [ ] **13.3** Implement `src/main/export.ts`; wire the export button in `GateBar.tsx` and the IPC handler.
-- [ ] **13.4** Run. Expected: PASS.
-- [ ] **13.5** Implement `bench/run.ts` and `bench/prompts.ts`. Run the full 10-prompt bench against real models.
-- [ ] **13.6** Save the CSV to `docs/superpowers/specs/captures/2026-07-28-wave-13-bench.csv` and one exported PNG to `docs/superpowers/specs/screenshots/2026-07-28-wave-13-export.png`.
-- [ ] **13.7** Commit.
+`ok` and `error` exist because spec §11's first bar is "completes without crash" and v1's CSV had no way to express the failure it was measuring.
+
+- [ ] **13.1** Write `tests/main/export.test.ts` first: `exportPng(doc32, 8, path)` writes 256×256; scale 3 rejected. **13.2** Run. FAIL. **13.3** Implement; wire the Export button and the IPC handler, replacing Wave 10's `not-implemented` stub. **13.4** Run. PASS.
+- [ ] **13.5** Implement `bench/run.ts` and `bench/prompts.ts`; run the full 10-prompt bench against real models.
+- [ ] **13.6** Save CSV to `captures/2026-07-28-wave-13-bench.csv` and one exported PNG to `screenshots/2026-07-28-wave-13-export.png`. Commit.
 
 **Acceptance criteria:**
-1. `npm test` green.
-2. Bench CSV committed with 10 real rows — reviewer confirms non-zero `totalMs` and a valid `stopReason` per row.
-3. Exported PNG committed at the declared scale with correct dimensions.
-4. Bench runs headless — no Electron, no window.
-5. Only Wave 13 whitelist files touched.
+1. `npm test` green; `npm run typecheck` now covers `bench/`.
+2. Bench CSV committed with 10 real rows, non-zero `totalMs`, and a valid `stopReason` or `error` per row.
+3. Timings come from `Round.timings`, not from the bench wall-clocking events.
+4. Exported PNG committed at the declared scale with correct dimensions.
+5. Bench runs headless — no Electron, no window.
+6. Only Wave 13 whitelist files touched.
 
 ---
 
 ## Wave 14 — Final human review gate
 
-**Goal:** A real end-to-end test of every MVP feature, run by the human, mapped feature-by-feature to the spec.
+A **human** gate. Pausing here is the designed outcome.
 
-This is a **human gate**, not a subagent gate. Pausing here is the designed outcome.
-
-**Feature checklist, each exercised live against real models:**
-
-| # | MVP feature | Spec ref | How it's exercised |
+| # | Feature | Spec | Exercised by |
 |---|---|---|---|
-| 1 | NL prompt → pixel art | §2, §7.4 | Type a fresh prompt, generate, see a sprite |
-| 2 | Canvas 16/32/64 | §2 | Generate one sprite at each size |
-| 3 | Curated palettes | §6.1a | Generate with `pico-8` and with `gameboy` (4-color) |
-| 4 | Deterministic linter | §6.5 | Introduce an orphan pixel by hand; confirm the warning |
-| 5 | Vision critique with regions | §6.4 | Click an issue; confirm the region highlights correctly |
-| 6 | Split confidence | §6.4 | Find a low-`suggestConfidence` issue; confirm `suggest` is withheld |
-| 7 | Bounded revise loop | §6.6 | Watch a round change pixels; confirm turn cap respected |
-| 8 | Auto-converge ≤3 rounds | §7.2 | Confirm the stop reason shown matches what fired |
-| 9 | User feedback loop | §7.3 | Type feedback at the gate; confirm another round runs |
-| 10 | Accept any round | §9 | Scrub to an earlier round and accept it |
-| 11 | Manual editing | §2 | Paint pixels by hand |
-| 12 | PNG export | §2 | Export at 8×; open the file |
-| 13 | Model pickers | §2 | Swap the critic model; confirm the next run uses it |
-| 14 | Version history | §6.7 | Confirm the session JSON round-trips and embeds `config` |
+| 1 | NL prompt → pixel art | §7.4 | Fresh prompt, generate, see a sprite |
+| 2 | Canvas 16/32/64 | §2 | One sprite at each size |
+| 3 | Curated palettes | §6.1a | `pico-8` and `gameboy` (4-colour) |
+| 4 | Deterministic linter | §6.5 | Hand-place an orphan; **confirm the dock's lint block updates** |
+| 5 | Critique with regions | §6.4 | Click an issue; region highlights correctly |
+| 6 | Split confidence | §6.4 | Find a low-`suggestConfidence` issue; `suggest` withheld |
+| 7 | Bounded revise loop | §6.6 | Watch pixels change; **confirm `Round.revise.turns` ≤ cap** |
+| 8 | Auto-converge ≤3 rounds | §7.2 | Status bar's stop reason matches `SessionHistory.stopReason` |
+| 9 | User feedback loop | §7.3 | Feedback at the gate runs another round; `Round.userFeedback` records it |
+| 10 | Accept any round | §9 | Scrub back, accept; `acceptedRound` records it |
+| 11 | Manual editing | §2 | Paint by hand |
+| 12 | PNG export | §2 | Export at 8×, open the file — **including hand edits from #11** |
+| 13 | Model pickers | §2 | Swap the critic; confirm via `meta.criticModel` on the next round |
+| 14 | Version history | §6.7 | Session JSON at `getSessionPath()` round-trips and embeds `config` |
 
-**Steps:**
-
-- [ ] **14.1** Run all 14 checks live. Record results — pass/fail plus observations — to `docs/superpowers/specs/captures/2026-07-28-wave-14-e2e.txt`.
-- [ ] **14.2** Screenshot each of the 14 features to `docs/superpowers/specs/screenshots/2026-07-28-wave-14-<n>-<feature>.png`.
-- [ ] **14.3** Measure the spec §11 acceptance criteria against the Wave 13 bench CSV. Record actual numbers.
-- [ ] **14.4** **Escalate to the human**: present the results and the §11 bars, with the provisional human-rating criterion for their ruling. This is the ratification point.
-- [ ] **14.5** Patch the spec with a `docs(spec):` commit recording actual measured values in place of the provisional guesses in §11 and §12.
+- [ ] **14.1** Run all 14 live. Record results to `captures/2026-07-28-wave-14-e2e.txt`.
+- [ ] **14.2** Screenshot each to `screenshots/2026-07-28-wave-14-<n>-<feature>.png`.
+- [ ] **14.3** Measure spec §11's bars against the Wave 13 CSV, reading each from the field §11 names.
+- [ ] **14.4** **Escalate to the human** with results and the provisional bar for ruling.
+- [ ] **14.5** Patch the spec with a `docs(spec):` commit recording measured values in place of §11 and §12's guesses.
 
 **Acceptance criteria:**
-1. All 14 features exercised live with committed evidence.
-2. Spec §11's four objective bars measured with real numbers.
+1. All 14 exercised live with committed evidence.
+2. §11's five objective bars measured with real numbers, each from its named field.
 3. The human has ruled on the subjective bar.
 4. Spec patched so the doc at HEAD is more honest than the one we started with.
 
@@ -726,10 +723,8 @@ This is a **human gate**, not a subagent gate. Pausing here is the designed outc
 
 ## Self-review
 
-**Spec coverage.** Every spec section maps to a wave: §5.1–5.2 → W1/W10; §6.1–6.1a → W1; §6.2–6.3 → W2/W6; §6.4 → W7; §6.5 → W3; §6.6 → W8; §6.7–6.8 → W1/W9; §7.1–7.3 → W9; §7.4 → W6/W7/W8; §8 → W11/W12; §9 → W6–W9 error paths + W12; §10 → every wave's tests plus W5's live smoke; §11 → W13 bench + W14 gate; §12 → W14.5 patches it; §13 deferred, correctly absent.
+**Spec coverage.** §5.1–5.2 → W10; §6.1–6.1a → W1; §6.2–6.3 → W2/W2c/W6; §6.4 → W7; §6.5 → W2c/W3; §6.6 → W8; §6.7–6.9 → W2c/W5/W9; §7.1–7.5 → W9; §8 → W11/W12; §9 → every wave's error paths + W12; §10 → every wave's tests + W5's live smoke + W7's captured critic output; §11 → W13 bench + W14; §12 → W14.5.
 
-**Placeholder scan.** No "TBD," no "add error handling," no "similar to Wave N." The one deliberate deviation from `writing-plans` — test bodies named rather than pre-written — is declared up front with its reasoning rather than left silent.
+**What v1's self-review missed, and why.** It checked internal consistency and found contradictions. It could not find *absences* — a field no producer sets, an acceptance criterion nothing can satisfy, a build step nobody wrote — because the author of a plan cannot see what they failed to write. Four of the first five defects in execution were absences. This v2 exists because an independent trace of declared inputs back to actual producers is a different activity, and only that found the other eighty.
 
-**Type consistency.** `SpriteDoc`, `Grid`, `LintReport`, `CritiqueReport`, `HarnessConfig`, `SessionHistory`, `PipelineEvent` are defined once in W1/W2 and referenced identically thereafter. `filterIssues` has one signature (W7) used unchanged in W9. `setPixel` takes `paletteSize` in W2 and is called that way in W8. `charIndex` returns `-1` for transparent in W2 and W3 relies on that.
-
-**One gap found and closed:** `PixelDiff` was used by `history.appendRound` in W9 but only implied in W1. It is now explicitly in W1's exported schema list.
+**Consequence for the remaining waves.** Each dispatch brief instructs the implementer to read ahead to its consumers and report anything in its own output that will not serve them. Three of the five Wave 1–2 defects came from exactly that instruction. It is the highest-yield line in a brief and it is not optional.
