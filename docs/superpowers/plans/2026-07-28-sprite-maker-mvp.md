@@ -72,6 +72,7 @@ Two limits on that, both found by the audit:
 | 2 | `src/shared/grid.ts`, `tests/shared/grid.test.ts` | — |
 | 2b | — | `src/shared/grid.ts`, `tests/shared/grid.test.ts`, `src/shared/schema.ts`, `tests/shared/schema.test.ts` |
 | **2c** | — | `src/shared/schema.ts`, `tests/shared/schema.test.ts` |
+| **2d** | — | `src/shared/schema.ts`, `tests/shared/schema.test.ts` |
 | 3 | `src/main/lint.ts`, `tests/main/lint.test.ts`, `tests/fixtures/sprites.ts` | — |
 | 4 | `src/main/render.ts`, `tests/main/render.test.ts`, `tests/fixtures/golden/*.png` | `package.json`, `tests/fixtures/sprites.ts` |
 | 5 | `src/main/ollama.ts`, `src/main/models.ts`, `tests/main/ollama.test.ts`, `tests/main/models.test.ts`, `tests/stubs/ollama.ts`, `tests/live/smoke.test.ts` | `package.json` |
@@ -291,6 +292,30 @@ export function setPixel(g: Grid, x: number, y: number, ch: string, paletteSize:
 
 ---
 
+## Wave 2d — Schema closure
+
+**Goal:** Land the last three schema items, so that from here to Wave 14 no wave needs `src/shared/schema.ts` and the B04 failure mode is genuinely over. Two came from Wave 2c's own read-ahead; one from its reviewer.
+
+| Change | Why |
+|---|---|
+| `SessionHistory.error: string \| null` | `draftFailures` covers only draft rejection. An `OllamaTimeoutError` during `CRITIQUING` is not a draft failure and nothing else could hold it — so a persisted history could not say why it failed, while spec §8 specifies the status bar to read failure state from that artifact |
+| `SessionHistory.schemaVersion: 1` **and** `HarnessConfigSchema` becomes `strictObject` | A lenient config schema silently drops an unrecognized key and substitutes the current default, so an artifact from an older run re-parses claiming limits it never used. That is precisely the confusion §6.8 exists to prevent, and `SessionHistory` had no other staleness signal |
+| `Round.round` and `SpriteDoc.meta.round` → `z.int().positive()` | Both were `nonnegative()`, so `round: 0` parsed even though §7.5 pins the draft as round 1. The schema could not catch a 0-based Wave 9 |
+
+- [ ] **2d.1** Write the failing tests first: a history carrying `error: "..."` parses and `error: null` parses, but the field is required; `schemaVersion` is required and pinned to `1`; `HarnessConfigSchema.parse({ criticUpscale: 16 })` **throws** rather than silently substituting `criticTargetPx: 512`; `round: 0` is rejected on both `Round` and `SpriteDoc.meta`.
+- [ ] **2d.2** Run. FAIL. **2d.3** Implement. **2d.4** Run. PASS — existing tests must survive except fixtures needing the two new required fields.
+- [ ] **2d.5** Commit.
+
+**Acceptance criteria:**
+1. `npm test` green; `npx tsc --noEmit` clean.
+2. `HarnessConfigSchema.parse({ criticUpscale: 16 })` throws. **This is the one that matters** — silently accepting it is how a stale artifact misreports its own run.
+3. `SessionHistorySchema` requires `schemaVersion` and `error`.
+4. `round: 0` rejected on both `Round` and `SpriteDoc.meta`.
+5. No existing test weakened — report every fixture changed and why.
+6. Only Wave 2d whitelist files touched.
+
+---
+
 ## Wave 3 — `main/lint.ts`
 
 **Goal:** The deterministic half of the review system. Spec §6.5 defines all five codes, their cardinality, and their `cells`/`indices` contents — **implement exactly that table and invent nothing.**
@@ -328,7 +353,18 @@ Three things the audit found that would otherwise bite:
 
 **Goal:** Grid → PNG, nearest-neighbour, at a scale factor.
 
-**Interfaces produced:** `export function toPng(doc: SpriteDoc, scale: number): Buffer`
+**Interfaces produced:**
+
+```ts
+export function toPng(doc: SpriteDoc, scale: number, background?: string): Buffer
+export function pickCriticBackground(doc: SpriteDoc): string   // hex, max luminance distance
+```
+
+**`background` exists because transparency composites to black for the vision encoder** — verified empirically (spec §4.5, capture `2026-07-29-transparency-vlm-probe.txt`). Shown a half-transparent, half-opaque-black image, `qwen3-vl` reported *"No visible differences."* Since `pico-8` index 0 is `#000000`, a black-outlined sprite on transparency loses its whole silhouette, which is exactly what §4.4 asks the image to judge.
+
+`pickCriticBackground` returns the hex with maximum WCAG luminance distance from the palette entries the sprite **actually uses** — computed, not fixed, because `nes-16` and `db16` both carry mid-greys and a hardcoded grey would reintroduce the defect for sprites using them.
+
+**Omitting `background` preserves alpha.** Export must never composite; only the critique path passes one.
 
 **`toPngWithGrid` is deleted from the design.** v1 specified it "solely to ground the critic's coordinates", but Wave 7 sends `toPng` plus the raw row text, and spec §4.4's stated mitigation *is* the text grid. It would have shipped untested, unused, with its rule colour and alpha behaviour unspecified.
 
@@ -377,6 +413,8 @@ export function createStubClient(script: StubScript): StubClient
 ```
 
 Waves 6–9 may **modify** this file to extend the script surface — they are in its Modified column precisely so that discovering a missing capability is a normal edit rather than an escalation.
+
+**Pre-authorised escalation:** `ToolDef`'s shape was invented in Wave 2c (spec §6.9 names `ChatMessage`, `ToolCall` and `ChatTurn` but not `ToolDef`), using Ollama's OpenAI-compatible envelope `{ type: "function", function: { name, description, parameters } }`. If the wire format differs, `src/shared/schema.ts` is **not** in this wave's whitelist — escalate rather than working around it. This is the B04 failure mode in miniature, and it is flagged here so it is a decision rather than a surprise.
 
 - [ ] **5.1** Write `tests/stubs/ollama.ts` to the shape above.
 - [ ] **5.2** Write `tests/main/ollama.test.ts` first, against a real local `http.createServer` fixture (not a `fetch` mock): `generate` posts `/api/generate` with `stream:false`; `vision` base64-encodes into `images` and forwards `options`/`format`; **`chatWithTools` posts `/api/chat`, marshals the tool array, and maps `message.tool_calls` to `ChatTurn.toolCalls` with `id`, `name` and parsed `arguments`** — this is Wave 8's only model path and the highest wire-format risk, and v1 left it untested; `listModels` parses `/api/tags`; connection refusal throws `OllamaUnreachableError` naming the endpoint; an `AbortSignal` cancels in flight and surfaces `OllamaTimeoutError(model, elapsedMs)` (the server fixture can simply hang).
@@ -456,7 +494,9 @@ export function filterIssues(report: CritiqueReport, cfg: HarnessConfig): Critiq
 
 **Repair runs on the raw JSON before validation** (§6.4's table). `Coord` is non-negative, so a partly-valid region like `[-5,-5,3,3]` — the most common VLM error — would otherwise fail the schema, consume the single reprompt, and degrade the whole report to zero issues.
 
-The call sends the upscaled PNG at `scale = max(1, floor(cfg.criticTargetPx / size.w))`, the raw row text, and `format: "json"`.
+The call sends the upscaled PNG at `scale = max(1, floor(cfg.criticTargetPx / size.w))`, **composited onto `pickCriticBackground(doc)`** (spec §4.5 — without it a dark-outlined sprite has no silhouette), the raw row text, and `format: "json"`.
+
+**`repairCritique` also repairs a missing `overall` or `readsAs` to `null`.** Both became nullable in Wave 2c so a degraded report need not invent a score — but a *live* critic omitting either would still fail validation and burn the single reprompt. §6.4's repair table does not list them because they were non-nullable when it was written.
 
 - [ ] **7.1** Write `tests/main/critique.test.ts` first: `confidence 0.2` with floor `0.3` → dropped; **`confidence 0.9 / suggestConfidence 0.4` → KEPT with `suggest === ""`** (dropping the whole issue here is the defect this test exists to catch); `0.9/0.6` keeps its suggest; region `[30,30,99,99]` on 32×32 clamps; `[-5,-5,3,3]` clamps rather than failing validation; reversed regions normalize; entirely-outside drops; missing `id` is synthesized rather than failing the report; non-JSON → exactly one reprompt containing the validation error; second failure → `degraded: true`, `overall: null`, `issues: []` — never a throw and never an invented score; `critique()` sends exactly one image plus the row text plus `format: "json"`.
 - [ ] **7.2** Run. FAIL. **7.3** Implement. **7.4** Run. PASS.
@@ -522,11 +562,22 @@ export interface PipelineDeps {
 export async function run(deps, input: { prompt; size; paletteId }, cfg): Promise<SessionHistory>
 export async function applyFeedback(deps, history, feedback: string, roundIndex: number, cfg): Promise<SessionHistory>
 export async function accept(history: SessionHistory, roundIndex: number): Promise<SessionHistory>
+
+// history.ts
+export function createHistory(sessionId: string, cfg: HarnessConfig): SessionHistory
+export function appendRound(h: SessionHistory, r: Round): SessionHistory
+export function completeRound(h: SessionHistory, index: number,
+  patch: { revise: ReviseSummary; reviseMs: number }): SessionHistory   // phase two
+export async function saveHistory(h: SessionHistory, dir: string): Promise<string>
 ```
 
 Spec §7.1 is the contract. The five things v1 got wrong, each now a required test:
 
 1. **The round is snapshotted at the top of every iteration**, after `CRITIQUING`, before any revision. v1 snapshotted only on the `REVISING` exit, so a run converging on its first critique returned `rounds: []`.
+
+   **A round is written in two phases** (spec §6.7). At snapshot time `revise` and `timings.reviseMs` describe a stage that has not run, so the round is pushed with both `null`, then **replaced in place** after the revise transition completes, then persisted again. `history.ts` therefore needs `completeRound(h, index, { revise, reviseMs })` alongside `appendRound`, and `persist` fires **twice** per revised round — once at snapshot, once at completion.
+
+   Without phase two, `revise` and `reviseMs` are permanently `null` on every round: `turns`, `hitCap` and `summary` become dead exactly as they were before the audit added them, and three of Wave 13's CSV columns silently empty. Buffering the round until after revision is not an alternative — it reintroduces `rounds: []` when `REVISING` times out into `FAILED`, and it starves the `round` event that draws the filmstrip during the longest stage.
 2. **`empty-diff` is evaluated as `diff(docBefore, docAfter)` on the revise transition** — never by reading a stored `diffFromPrev`, which is `null` on round 1.
 3. **Feedback re-enters at `REVISING`**, and the resulting round's `parentId` points at the round the user was looking at, which may not be the last.
 4. **`diffFromPrev` is computed against the parent**, not the array-previous — `applyFeedback` may branch.
@@ -534,7 +585,7 @@ Spec §7.1 is the contract. The five things v1 got wrong, each now a required te
 
 Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is round 1 and `maxRounds` bounds critiques; an empty filtered issue list skips `REVISING` unconditionally; two unparseable critiques stop with `critic-failed`, never `no-high-severity`.
 
-- [ ] **9.1** Write `tests/main/history.test.ts`: `createHistory` embeds `cfg` verbatim; `appendRound` diffs against the **parent**; `saveHistory` round-trips through `SessionHistorySchema`.
+- [ ] **9.1** Write `tests/main/history.test.ts`: `createHistory` embeds `cfg` verbatim and sets `outcome: "failed"`; `appendRound` diffs against the **parent**; `completeRound` fills `revise` and `timings.reviseMs` on the round it names and leaves every other field untouched; `saveHistory` round-trips through `SessionHistorySchema`.
 - [ ] **9.2** Write `tests/main/pipeline.test.ts` first, entirely against the stub. One test per behaviour: **the happy path produces `rounds.length === 1` and `stopReason === "no-high-severity"`** (v1's test asserted only the event sequence and would have passed against an empty history — assert the rounds); an always-high-severity critic stops at `round-cap` after exactly `maxRounds` critiques; a no-op revise stops with `empty-diff` **before** the cap; **round 1 never stops with `empty-diff`**; a high-severity issue at `confidence: 0.1` does not keep the loop running; two unparseable critiques stop with `critic-failed` and `outcome` is still `"completed"`; `applyFeedback` injects `confidence === 1.0`, records `userFeedback`, and sets `parentId` to the edited round; `DraftRejectedError` → `finalState: "FAILED"`, `outcome: "failed"`, raw output in `draftFailures`; a derived doc has a fresh `id` and `repairedRows: []`; `persist` is called once per round; `run()` rejects a config with `maxRounds: 0`.
 - [ ] **9.3** Run. FAIL. **9.4** Implement `history.ts` then `pipeline.ts`. **9.5** Run. PASS.
 - [ ] **9.6** Save the happy-path event trace to `captures/2026-07-28-wave-9-event-trace.txt`. Commit.
@@ -547,9 +598,12 @@ Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is roun
 5. Filter-then-evaluate: one `severity: "high", confidence: 0.1` issue stops with `no-high-severity` on round 1.
 6. Two unparseable critiques stop with `critic-failed`, not `no-high-severity`.
 7. Derived docs carry a fresh `id`, correct `parentId`, and `repairedRows: []`.
-8. The whole suite runs with Ollama stopped.
-9. Event trace committed showing the real state sequence.
-10. Only Wave 9 whitelist files touched.
+8. **After a revised round, `rounds[i].revise.turns` and `rounds[i].timings.reviseMs` are populated** — not `null`. Reviewer runs a two-round scenario and inspects round 0. This is the check that catches the two-phase lifecycle being skipped, which would silently empty three bench columns.
+9. **A history persisted mid-run reads `outcome: "failed"`.** Only a genuinely completed run flips it to `"completed"` — an interrupted run is a failed run, and §11's first bar reads this field.
+10. `acceptedRound` stores `Round.round` (1-based), not the array index it was called with.
+11. The whole suite runs with Ollama stopped.
+12. Event trace committed showing the real state sequence.
+13. Only Wave 9 whitelist files touched.
 
 ---
 

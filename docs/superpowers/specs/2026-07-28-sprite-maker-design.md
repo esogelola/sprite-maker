@@ -77,7 +77,15 @@ Four things in the original concept do not survive contact with the constraints.
 
 **4.3 — "NVIDIA Omni" does not map to a real product for this use.** *Omni* is Alibaba's any-to-any family (text/image/audio/video in, text+speech out); NVIDIA serves vision models through NIM. Resolved to `qwen3-vl`: vision is the only modality this project needs, and Omni's audio/speech capacity would be paid-for weight that never runs.
 
-**4.4 — VLMs are weak on raw low-resolution input.** A 32×32 image passed to a vision encoder is resampled to 224–448 px and arrives as a blur. Two mitigations are built into the critique stage: nearest-neighbour upscale to ~512 px (preserving hard edges), and passing the **index grid as text alongside the image**. The image supplies gestalt ("does this read as a fox?"); the text supplies coordinates. Asking a VLM to derive `(11,6)` from pixels alone is where this design would otherwise fail.
+**4.4 — VLMs are weak on raw low-resolution input.** A 32×32 image passed to a vision encoder is resampled to 224–448 px and arrives as a blur. Three mitigations are built into the critique stage: nearest-neighbour upscale to ~512 px (preserving hard edges), passing the **index grid as text alongside the image**, and compositing transparency onto a flat background (below). The image supplies gestalt ("does this read as a fox?"); the text supplies coordinates. Asking a VLM to derive `(11,6)` from pixels alone is where this design would otherwise fail.
+
+**4.5 — Transparency composites to black, erasing silhouettes.** Verified empirically against `qwen3-vl:8b-instruct-q4_K_M`; capture at `captures/2026-07-29-transparency-vlm-probe.txt`. Shown a half-transparent, half-opaque-black image, the model reported *"No visible differences; both halves are identical black backgrounds."* Transparent and `#000000` are not merely hard to tell apart — they are indistinguishable to the encoder.
+
+This is the common case, not an edge case: `pico-8` index 0 is `#000000` and `db16` index 0 is `#140c1c`, so a black-outlined sprite on transparency — the standard pixel-art idiom — loses its entire silhouette boundary. And the silhouette is exactly what §4.4 assigns the image to judge.
+
+**The critic's image composites transparency onto a computed flat colour**, chosen per sprite for maximum luminance distance from the palette entries that sprite actually uses. Computed rather than fixed: `nes-16` and `db16` both carry mid-greys, so a hardcoded grey background would reintroduce the erased boundary for any sprite using them — the same defect, less often, which is the harder kind to notice.
+
+The background never appears in the exported PNG. Export preserves alpha; only the critique path composites.
 
 ## 5. Architecture
 
@@ -325,6 +333,7 @@ Round {
 }
 
 SessionHistory {
+  schemaVersion: 1,                    // staleness detection — see below
   sessionId: string,
   config: HarnessConfig,               // serialized on every run
   rounds: Round[],
@@ -332,9 +341,14 @@ SessionHistory {
   stopReason: StopReason | null,
   finalState: PipelineState,
   outcome: "completed" | "failed",
-  acceptedRound: number | null
+  error: string | null,                // why a run failed, when it wasn't a draft
+  acceptedRound: number | null         // Round.round, 1-based — not an array index
 }
 ```
+
+**`error` exists because `draftFailures` covers only draft rejection.** An `OllamaTimeoutError` during `CRITIQUING` is not a draft failure, and nothing else could hold it — so a persisted history could not say why it failed, while §8 specifies the status bar to read failure state from exactly that artifact.
+
+**`schemaVersion` and a strict `HarnessConfigSchema` together close the staleness hole.** §6.8 exists so two benchmark runs can be compared; but a lenient config schema silently drops an unrecognized key and substitutes the current default, so an artifact from an older run would re-parse claiming limits it never used — "a difference might come from the change under test or from a limit that was altered and forgotten," which is the sentence §6.8 uses to justify itself. Strict parsing makes a stale artifact fail loudly, and `schemaVersion` says which shape it was written against.
 
 Several of these fields exist because their absence was a defect:
 
@@ -349,6 +363,16 @@ Several of these fields exist because their absence was a defect:
 - **`acceptedRound`** — the global constraint "any round may be accepted, not only the last" was implemented by no wave and recorded in no field.
 
 The history is persisted after every round via a `persist` callback on `PipelineDeps` — a callback rather than a path, so `pipeline.ts` stays Electron-free and the stub-driven tests stay disk-free.
+
+**A `Round` is written in two phases, and this is not optional.** Ruling R2 snapshots the round at the top of each iteration — but `revise` and `timings.reviseMs` describe a stage that has not run yet. So the round is pushed with `revise: null` and `reviseMs: null` (which is what makes a converging first critique still yield `rounds.length === 1`), and then **replaced in place once the revise transition completes**, followed by a second `persist`.
+
+Buffering the round until after revision is foreclosed three ways: R2 requires a snapshot on *every* iteration, so deferring reintroduces `rounds: []` when `REVISING` times out into `FAILED`; the `round` `PipelineEvent` is the only source of a mid-run filmstrip frame during the longest stage; and the bench reads `reviseMs` and `hitCap` from `Round`, not from wall-clocked events.
+
+Without the second phase, `revise` and `reviseMs` are permanently `null` on every round — which makes `turns`, `hitCap` and `summary` dead exactly as they were before the audit added them, and silently empties three of the bench's CSV columns.
+
+**`outcome` reads `"failed"` until the run genuinely completes.** `persist` fires after every round, so an in-progress history must not claim success — a crash mid-run would otherwise leave an artifact reporting `"completed"`, and §11's first acceptance bar reads that exact field. An interrupted run *is* a failed run.
+
+**`acceptedRound` stores `Round.round` (1-based), not an array index.** `Api.accept(roundIndex)` speaks the renderer's 0-based array position; the persisted field names the round.
 
 ### 6.8 `HarnessConfig`
 
