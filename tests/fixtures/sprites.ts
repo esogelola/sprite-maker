@@ -252,6 +252,68 @@ export const BLANK = SpriteDocSchema.parse({
   rows: blankRows(16),
 });
 
+/**
+ * 16×16 filled entirely with `test-struct` index **3** (`#ffffff`, L 1.0) — the
+ * only fixture whose used entries sit at the *top* of the luminance range.
+ *
+ * Wave 4's `pickCriticBackground` (spec §4.5) returns the colour furthest in
+ * luminance from the entries a sprite actually uses, and every other fixture in
+ * this file draws with something dark enough that the answer comes back light.
+ * A picker biased toward white — or one that ignores the rows and reads the
+ * whole palette — passes on all of them. Here the two readings are 181 grey
+ * levels apart: against the used entry alone the answer is `#000000`, against
+ * the whole `test-struct` ramp it is `#b5b5b5`.
+ *
+ * Fully opaque, so it doubles as the sprite where a renderer skipping the last
+ * row or column leaves a transparent stripe rather than a plausible colour.
+ */
+export const WHITE_ONLY = SpriteDocSchema.parse({
+  ...base("fx-white-only", "a solid white square"),
+  size: { w: 16, h: 16 },
+  palette: STRUCT_PALETTE_REF,
+  rows: band("3", 16, 16),
+});
+
+/**
+ * A white blob inside a black outline — `test-struct` indices **0 and 3 only**,
+ * the two ends of the ramp and nothing between them.
+ *
+ * This is spec §4.5's motivating sprite, in the smallest form that shows the
+ * defect. Black outlines are the standard pixel-art idiom and `pico-8` index 0
+ * is `#000000`, so a critique background chosen without counting index 0 comes
+ * back **black** — and the outline, the thing §4.4 assigns the image to judge,
+ * disappears into it. Every other fixture here either omits index 0 or happens
+ * to yield the same answer with and without it; this one does not. The correct
+ * background is the mid grey `#bcbcbc`, equidistant from both ends.
+ *
+ * The ring is unbroken and one cell thick, so `lint()` sees no orphan and no
+ * outline gap: the fixture is about colour, and a structural warning here would
+ * be noise in whichever test later reads it.
+ */
+export const BLACK_OUTLINE = SpriteDocSchema.parse({
+  ...base("fx-black-outline", "a white blob with a black outline"),
+  size: { w: 16, h: 16 },
+  palette: STRUCT_PALETTE_REF,
+  rows: [
+    "................", //  0
+    "................", //  1
+    "..000000000000..", //  2
+    "..033333333330..", //  3
+    "..033333333330..", //  4
+    "..033333333330..", //  5
+    "..033333333330..", //  6
+    "..033333333330..", //  7
+    "..033333333330..", //  8
+    "..033333333330..", //  9
+    "..033333333330..", // 10
+    "..033333333330..", // 11
+    "..033333333330..", // 12
+    "..000000000000..", // 13
+    "................", // 14
+    "................", // 15
+  ],
+});
+
 // ---------------------------------------------------------------------------
 // orphan-pixel
 // ---------------------------------------------------------------------------
@@ -1383,6 +1445,8 @@ export const ROW_REPAIRED_64 = SpriteDocSchema.parse({
 export const ALL_FIXTURES = {
   SOLID_BLOCK,
   BLANK,
+  WHITE_ONLY,
+  BLACK_OUTLINE,
   ONE_ORPHAN,
   DIAGONAL_ONLY,
   CORNER_PIXEL,

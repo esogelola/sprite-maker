@@ -18,6 +18,12 @@
  * function is reached. Hence `LintReport` has no `errors` and §7.1's machine has
  * no `LINTING → FAILED` edge.
  *
+ * **The contrast formula is not defined here** (amendment A7). Wave 3 shipped
+ * `relativeLuminance` and `LOW_CONTRAST_THRESHOLD` from this file; Wave 4 moved
+ * both to `shared/color.ts` unchanged, because `main/*` is unreachable from the
+ * renderer bundle and the first UI feature needing contrast would have had to
+ * write a second copy. This module imports them and computes nothing itself.
+ *
  * **The palette comes off the document, never out of the registry.** `lint()`
  * reads `doc.palette.colors` and never calls `getPalette(doc.palette.id)` —
  * spec §6.2 snapshots the palette onto the document precisely so a saved sprite
@@ -25,20 +31,12 @@
  * palette is not bundled.
  */
 
+import { LOW_CONTRAST_THRESHOLD, relativeLuminance } from "@shared/color";
 import { TRANSPARENT, charIndex, type Grid } from "@shared/grid";
 import type { LintReport, LintWarning, SpriteDoc } from "@shared/schema";
 
 /** `[x, y]`, matching `LintWarning.cells`. */
 type Cell = [number, number];
-
-/**
- * Below this WCAG relative-luminance difference, two orthogonally adjacent
- * palette indices read as one shape rather than two — spec §6.5.
- *
- * `gameboy` indices 2 and 3 sit at Δ 0.0794 against it: a 0.8% margin, and the
- * canary for any change to `relativeLuminance` below.
- */
-export const LOW_CONTRAST_THRESHOLD = 0.08;
 
 /**
  * The character at `(x, y)`, treating everything outside the canvas as
@@ -56,34 +54,6 @@ function at(g: Grid, x: number, y: number): string {
   const row = g[y];
   if (x < 0 || x >= row.length) return TRANSPARENT;
   return row[x];
-}
-
-/** The sRGB → linear transfer function, applied per channel. */
-function linearize(channel: number): number {
-  return channel <= 0.04045
-    ? channel / 12.92
-    : Math.pow((channel + 0.055) / 1.055, 2.4);
-}
-
-/**
- * WCAG relative luminance of a `#rrggbb` colour, in `0..1`.
- *
- * The standard formula, unrounded and unapproximated — spec §6.5 says so in as
- * many words. `gameboy` 2↔3 is Δ 0.0794 against a 0.08 threshold, so quantizing
- * the channels, rounding the exponent, or substituting a cheap
- * perceived-brightness approximation each silently delete a real warning while
- * leaving every other assertion green.
- *
- * Exported because Wave 4's `pickCriticBackground` needs the same figure — spec
- * §4.5 has it pick the background colour with maximum luminance distance from
- * the palette entries a sprite actually uses — and a second implementation of
- * this formula is the exact defect the paragraph above warns about.
- */
-export function relativeLuminance(hex: string): number {
-  const r = linearize(parseInt(hex.slice(1, 3), 16) / 255);
-  const g = linearize(parseInt(hex.slice(3, 5), 16) / 255);
-  const b = linearize(parseInt(hex.slice(5, 7), 16) / 255);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
 /** `pixel` / `pixels`, so a one-orphan message does not read as a typo. */
