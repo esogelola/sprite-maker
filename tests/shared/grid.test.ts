@@ -159,10 +159,19 @@ interface NormalizeCase {
   rows: string[];
   w: number;
   h: number;
+  /**
+   * Spec §6.3 amendment A4. Omitted means 16 — the encoding ceiling, at which
+   * every character `0`-`f` is on-palette, so a case that omits it is testing
+   * something other than palette range.
+   */
+  paletteSize?: number;
   grid: Grid;
   repairs: number;
   repairedRows: number[];
 }
+
+/** The palette size a case that does not care about palette range runs under. */
+const FULL_PALETTE = 16;
 
 const NORMALIZE_CASES: NormalizeCase[] = [
   {
@@ -278,21 +287,92 @@ const NORMALIZE_CASES: NormalizeCase[] = [
     repairs: 2,
     repairedRows: [0],
   },
+  // -- spec §6.3 amendment A4: off-palette indices ---------------------------
+  {
+    name: "an index at exactly paletteSize is repaired to '.'",
+    rows: ["0124"],
+    w: 4,
+    h: 1,
+    paletteSize: 4,
+    grid: ["012."],
+    repairs: 1,
+    repairedRows: [0],
+  },
+  {
+    name: "the highest index the palette actually has survives untouched",
+    rows: ["0123"],
+    w: 4,
+    h: 1,
+    paletteSize: 4,
+    grid: ["0123"],
+    repairs: 0,
+    repairedRows: [],
+  },
+  {
+    name: "a whole row of 'f' against a 4-colour palette is repaired away",
+    rows: ["ffff"],
+    w: 4,
+    h: 1,
+    paletteSize: 4,
+    grid: ["...."],
+    repairs: 4,
+    repairedRows: [0],
+  },
+  {
+    name: "off-palette repairs add to the length repairs of the same row",
+    rows: ["9f"],
+    w: 4,
+    h: 1,
+    paletteSize: 4,
+    grid: ["...."],
+    repairs: 4, // two off-palette indices, then two pads
+    repairedRows: [0],
+  },
+  {
+    name: "'.' is valid at any palette size, even one with no colours at all",
+    rows: ["...."],
+    w: 4,
+    h: 1,
+    paletteSize: 0,
+    grid: ["...."],
+    repairs: 0,
+    repairedRows: [],
+  },
+  {
+    name: "paletteSize 16 accepts every index 0-f",
+    rows: ["0123456789abcdef"],
+    w: 16,
+    h: 1,
+    paletteSize: 16,
+    grid: ["0123456789abcdef"],
+    repairs: 0,
+    repairedRows: [],
+  },
+  {
+    name: "only the off-palette rows are listed in repairedRows",
+    rows: ["0123", "01f3", "3210"],
+    w: 4,
+    h: 3,
+    paletteSize: 4,
+    grid: ["0123", "01.3", "3210"],
+    repairs: 1,
+    repairedRows: [1],
+  },
 ];
 
 describe("normalize (spec §6.3)", () => {
   it.each(NORMALIZE_CASES)("$name", (c) => {
-    const result = normalize(c.rows, c.w, c.h);
+    const result = normalize(c.rows, c.w, c.h, c.paletteSize ?? FULL_PALETTE);
     expect(result.grid).toEqual(c.grid);
     expect(result.repairs).toBe(c.repairs);
     expect(result.repairedRows).toEqual(c.repairedRows);
   });
 
-  it.each(NORMALIZE_CASES)("$name — produces exactly h rows of w chars", (c) => {
-    const { grid } = normalize(c.rows, c.w, c.h);
-    expect(grid).toHaveLength(c.h);
-    for (const row of grid) expect(row).toHaveLength(c.w);
-  });
+  // A second `it.each(NORMALIZE_CASES)` asserting "exactly h rows of w chars"
+  // was deleted here: `toEqual(c.grid)` above compares against a literal array
+  // of `h` strings of `w` characters, which entails both properties, so the
+  // duplicate block could only ever go red alongside the tests it duplicated.
+  // Verified by mutation, not by argument alone — see the Wave 2b report.
 
   /**
    * The plan's Wave 2 acceptance criterion 3 asserts
@@ -304,14 +384,14 @@ describe("normalize (spec §6.3)", () => {
    * implementation's behaviour; the discrepancy is reported, not patched.
    */
   it("keeps 'a' and 'b' as indices 10 and 11 and pads to width", () => {
-    const result = normalize(["ab"], 4, 1);
+    const result = normalize(["ab"], 4, 1, FULL_PALETTE);
     expect(result.grid).toEqual(["ab.."]);
     expect(result.repairs).toBe(2);
     expect(result.repairedRows).toEqual([0]);
   });
 
   it("does count genuinely invalid characters, including uppercase", () => {
-    const result = normalize(["AB"], 4, 1);
+    const result = normalize(["AB"], 4, 1, FULL_PALETTE);
     expect(result.grid).toEqual(["...."]);
     expect(result.repairs).toBe(4);
     expect(result.repairedRows).toEqual([0]);
@@ -320,23 +400,93 @@ describe("normalize (spec §6.3)", () => {
   it("never mutates the rows it was handed", () => {
     const rows = ["0g", "0123456", "0123"];
     const before = rows.slice();
-    normalize(rows, 4, 2);
+    normalize(rows, 4, 2, FULL_PALETTE);
     expect(rows).toEqual(before);
     expect(rows).toHaveLength(3);
   });
 
-  it("produces a grid every row of which is a fresh string, not a shared ref", () => {
+  it("returns a grid array that does not alias the caller's rows", () => {
     const rows = ["0123"];
-    const { grid } = normalize(rows, 4, 1);
+    const { grid } = normalize(rows, 4, 1, FULL_PALETTE);
     expect(grid).not.toBe(rows);
+    // A caller extending the result — Wave 9 holds these per-round snapshots —
+    // must not reach back into the array the model output was parsed into.
+    grid.push("....");
+    expect(rows).toEqual(["0123"]);
+    expect(rows).toHaveLength(1);
   });
 
   it("accepts a full 16x16 canvas of valid characters with zero repairs", () => {
     const rows = Array.from({ length: 16 }, () => "0123456789abcdef");
-    const result = normalize(rows, 16, 16);
+    const result = normalize(rows, 16, 16, FULL_PALETTE);
     expect(result.repairs).toBe(0);
     expect(result.repairedRows).toEqual([]);
     expect(result.grid).toEqual(rows);
+  });
+
+  // -- spec §6.3 amendment A4 -----------------------------------------------
+
+  it("repairs every index the palette does not have — plan acceptance 3", () => {
+    const result = normalize(["ffff"], 4, 1, 4);
+    expect(result.repairs).toBe(4);
+    expect(result.grid).toEqual(["...."]);
+    expect(result.repairedRows).toEqual([0]);
+  });
+
+  it("leaves a draft that stays inside its palette alone — plan acceptance 4", () => {
+    const result = normalize(["0123"], 4, 1, 4);
+    expect(result.repairs).toBe(0);
+    expect(result.grid).toEqual(["0123"]);
+    expect(result.repairedRows).toEqual([]);
+  });
+
+  it.each([4, 5, 8, 15, 16])(
+    "at paletteSize %i keeps index size-1 and repairs index size",
+    (size) => {
+      const highest = indexChar(size - 1);
+      const kept = normalize([highest], 1, 1, size);
+      expect(kept.grid).toEqual([highest]);
+      expect(kept.repairs).toBe(0);
+      expect(kept.repairedRows).toEqual([]);
+
+      if (size < 16) {
+        const past = indexChar(size);
+        const repaired = normalize([past], 1, 1, size);
+        expect(repaired.grid).toEqual([TRANSPARENT]);
+        expect(repaired.repairs).toBe(1);
+        expect(repaired.repairedRows).toEqual([0]);
+      }
+    },
+  );
+
+  it("charges an off-palette index exactly one repair, like a bad character", () => {
+    const offPalette = normalize(["0f"], 2, 1, 4);
+    const badChar = normalize(["0g"], 2, 1, 4);
+    expect(offPalette.repairs).toBe(badChar.repairs);
+    expect(offPalette.grid).toEqual(badChar.grid);
+    expect(offPalette.repairedRows).toEqual(badChar.repairedRows);
+  });
+
+  it("repairs a gameboy draft that reaches past its 4-colour ramp", () => {
+    // The exact defect A4 exists to close: a 4-colour palette, a model that
+    // emits index 9, and — before A4 — a doc that sailed through to the
+    // renderer where `palette.colors[9]` is `undefined`.
+    const rows = Array.from({ length: 16 }, () => "0123012301230123");
+    rows[7] = "0123012399990123";
+    const result = normalize(rows, 16, 16, 4);
+    expect(result.repairs).toBe(4);
+    expect(result.repairedRows).toEqual([7]);
+    expect(result.grid[7]).toBe("01230123....0123");
+    expect(result.grid.join("")).not.toContain("9");
+  });
+
+  it("requires paletteSize — a palette-blind three-argument call is a type error", () => {
+    // Not invoked: the assertion is that `tsc` rejects the call. An optional
+    // `paletteSize` would let a caller silently keep the pre-A4 behaviour,
+    // which is the whole defect.
+    // @ts-expect-error paletteSize is required — spec §6.3 amendment A4.
+    const paletteBlind = () => normalize(["ffff"], 4, 1);
+    expect(typeof paletteBlind).toBe("function");
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { charIndex } from "@shared/grid";
 import {
   CritiqueReportSchema,
   DEFAULT_HARNESS_CONFIG,
@@ -42,6 +43,22 @@ function validDoc(over: Record<string, unknown> = {}): Record<string, unknown> {
     ...over,
   };
 }
+
+/**
+ * A 16-entry palette, for the cases that exercise the whole `0`-`f` encoding.
+ * `validDoc`'s default palette is `gameboy` — four colours — so under spec §6.3
+ * amendment A4 a doc using index 4 or above has to declare a palette that
+ * actually has those entries.
+ */
+const PALETTE_16 = {
+  id: "pico-8",
+  colors: [
+    "#000000", "#1d2b53", "#7e2553", "#008751",
+    "#ab5236", "#5f574f", "#c2c3c7", "#fff1e8",
+    "#ff004d", "#ffa300", "#ffec27", "#00e436",
+    "#29adff", "#83769c", "#ff77a8", "#ffccaa",
+  ],
+};
 
 const validIssue = (over: Partial<Issue> = {}) => ({
   id: "i1",
@@ -129,8 +146,13 @@ describe("SpriteDocSchema", () => {
   });
 
   it("accepts every legal row character", () => {
+    // The palette has to carry all 16 entries for all 16 indices to be legal —
+    // spec §6.3 amendment A4. This fixture used the 4-colour `gameboy` default
+    // and passed, which was the defect itself.
     const rows = Array.from({ length: 16 }, () => "0123456789abcdef");
-    expect(SpriteDocSchema.safeParse(validDoc({ rows })).success).toBe(true);
+    expect(
+      SpriteDocSchema.safeParse(validDoc({ rows, palette: PALETTE_16 })).success,
+    ).toBe(true);
   });
 
   it("rejects size.w = 24 inside a doc", () => {
@@ -152,6 +174,175 @@ describe("SpriteDocSchema", () => {
   it("defaults meta.repairedRows to an empty list", () => {
     const parsed: SpriteDoc = SpriteDocSchema.parse(validDoc());
     expect(parsed.meta.repairedRows).toEqual([]);
+  });
+
+  // -- spec §6.3 amendment A4: off-palette indices are unrepresentable -------
+
+  it("rejects a 4-colour gameboy doc whose row 0 is all 'f'", () => {
+    // The exact document the Wave 2 reviewer confirmed parsed successfully:
+    // palette.colors.length === 4, yet every character indexes entry 15, where
+    // `palette.colors[15]` is `undefined` by the time the renderer reads it.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[0] = "ffffffffffffffff";
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+  });
+
+  it("names the offending row and character in the error", () => {
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[9] = "..3." + "..f." + "...." + "....";
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const serialized = JSON.stringify(res.error.issues);
+      expect(serialized).toMatch(/row 9/);
+      expect(serialized).toMatch(/'f'/); // the offending character, quoted
+      expect(serialized).toMatch(/char 6/); // and where in the row it sits
+      // The path points at the row, so a UI can highlight it without parsing
+      // the message.
+      expect(res.error.issues.some((i) => i.path.join(".") === "rows.9")).toBe(true);
+    }
+  });
+
+  it("accepts the highest index its palette has and rejects the next one", () => {
+    const rowsOk = Array.from({ length: 16 }, () => row16());
+    rowsOk[0] = "3" + ".".repeat(15); // gameboy has entries 0-3
+    expect(SpriteDocSchema.safeParse(validDoc({ rows: rowsOk })).success).toBe(true);
+
+    const rowsBad = Array.from({ length: 16 }, () => row16());
+    rowsBad[0] = "4" + ".".repeat(15);
+    expect(SpriteDocSchema.safeParse(validDoc({ rows: rowsBad })).success).toBe(false);
+  });
+
+  it("accepts the same rows once the palette actually carries 16 colours", () => {
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[0] = "ffffffffffffffff";
+    expect(
+      SpriteDocSchema.safeParse(validDoc({ rows, palette: PALETTE_16 })).success,
+    ).toBe(true);
+  });
+
+  it("keeps '.' legal no matter how small the palette is", () => {
+    const doc = validDoc({
+      palette: { id: "tiny", colors: ["#000000", "#111111", "#222222", "#333333"] },
+    });
+    expect(SpriteDocSchema.safeParse(doc).success).toBe(true);
+  });
+
+  it("rejects an off-palette character in the last column of its row", () => {
+    // x === size.w - 1. Every other off-palette fixture here sits at x = 0 or
+    // x = 6, or fills its row — and a filled row's per-row `break` fires at
+    // x = 0 — so a loop bound of `x < row.length - 1` would pass all of them
+    // while letting this doc reach the renderer with `colors[15] === undefined`.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[3] = ".".repeat(15) + "f";
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const paths = res.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("rows.3");
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 3 char 15 is 'f'/);
+    }
+  });
+
+  it("rejects an off-palette character on the last row of the document", () => {
+    // y === size.h - 1. The other off-palette fixtures live on rows 0, 2, 5 and
+    // 9, so a refinement that stops one row short of the end passes them all.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[15] = "f" + ".".repeat(15);
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const paths = res.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("rows.15");
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 15 char 0 is 'f'/);
+    }
+  });
+
+  it("rejects an off-palette character in the last column of the last row", () => {
+    // Both bounds at once: the single cell an off-by-one on either axis hides.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[15] = ".".repeat(15) + "e";
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const paths = res.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("rows.15");
+      expect(JSON.stringify(res.error.issues)).toMatch(/row 15 char 15 is 'e'/);
+    }
+  });
+
+  it("reports one issue per offending row, not one per document", () => {
+    // Five offending characters over two rows. Both halves of the name are
+    // counted, not merely searched for: two issues in total (per row, not one
+    // document-level summary) and exactly one apiece (per row, not per
+    // character) — `toContain` alone cannot tell those apart.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[2] = "9" + ".".repeat(6) + "b" + ".".repeat(7) + "d";
+    rows[5] = "a" + ".".repeat(14) + "e";
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const paths = res.error.issues.map((i) => i.path.join("."));
+      expect(paths).toContain("rows.2");
+      expect(paths).toContain("rows.5");
+      expect(paths.filter((p) => p === "rows.2")).toHaveLength(1);
+      expect(paths.filter((p) => p === "rows.5")).toHaveLength(1);
+      expect(paths).toHaveLength(2);
+    }
+  });
+
+  it("emits exactly one issue for a row holding four off-palette characters", () => {
+    // The per-row `break`, pinned by count. Four faults on row 7, including one
+    // in the last column; the refinement reports the first and stops.
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[7] = "f" + ".".repeat(3) + "9" + ".".repeat(4) + "e" + ".".repeat(5) + "c";
+    expect(rows[7]).toHaveLength(16);
+    const res = SpriteDocSchema.safeParse(validDoc({ rows }));
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      const row7 = res.error.issues.filter((i) => i.path.join(".") === "rows.7");
+      expect(row7).toHaveLength(1);
+      expect(res.error.issues).toHaveLength(1);
+      // ...and it is the first fault in the row that gets named.
+      expect(row7[0].message).toMatch(/row 7 char 0 is 'f'/);
+    }
+  });
+
+  it.each([4, 16])(
+    "at a %i-colour palette accepts exactly the characters charIndex allows",
+    (size) => {
+      // Pins the schema's local index mirror against `shared/grid.ts`'s
+      // `charIndex`, so the two encodings cannot drift apart.
+      const palette = { id: "probe", colors: PALETTE_16.colors.slice(0, size) };
+      for (const c of [...".0123456789abcdef", "g", "A", "F", "z", "/"]) {
+        const rows = Array.from({ length: 16 }, () => row16());
+        rows[0] = c + ".".repeat(15);
+        const expected = c === "." || (charIndex(c) >= 0 && charIndex(c) < size);
+        expect(SpriteDocSchema.safeParse(validDoc({ rows, palette })).success).toBe(
+          expected,
+        );
+      }
+    },
+  );
+
+  it("rejects an off-palette doc nested in a SessionHistory round", () => {
+    const rows = Array.from({ length: 16 }, () => row16());
+    rows[0] = "ffffffffffffffff";
+    const bad = {
+      sessionId: "s-1",
+      config: DEFAULT_HARNESS_CONFIG,
+      rounds: [
+        {
+          round: 0,
+          doc: validDoc({ rows }),
+          critique: null,
+          lint: validLint(),
+          diffFromPrev: [],
+        },
+      ],
+    };
+    expect(SessionHistorySchema.safeParse(bad).success).toBe(false);
   });
 });
 

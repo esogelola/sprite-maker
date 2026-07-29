@@ -27,6 +27,25 @@ const HexColor = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "expected a #rrggbb hex c
 export const ROW_CHAR_RE = /^[.0-9a-f]$/;
 const RowChar = z.string().regex(ROW_CHAR_RE, "expected '.' or a hex digit 0-f");
 
+/** The transparent cell. Spelled here rather than imported: see `rowCharIndex`. */
+const TRANSPARENT = ".";
+
+/** Palette index `i` is spelled `HEX_CHARS[i]` — spec §6.1. */
+const HEX_CHARS = "0123456789abcdef";
+
+/**
+ * Row character → palette index, or `-1` for transparent and for anything that
+ * is not a lowercase hex digit.
+ *
+ * Deliberately a local mirror of `charIndex` in `shared/grid.ts` rather than an
+ * import: `grid.ts` imports its types from this module, and making the contract
+ * layer depend on a behaviour module to state its own encoding inverts that.
+ * `tests/shared/schema.test.ts` pins the two to agree character for character.
+ */
+function rowCharIndex(c: string): number {
+  return HEX_CHARS.indexOf(c);
+}
+
 /** A whole row of encoded pixels. Length is checked against `size.w` on the doc. */
 const Row = z.string().regex(/^[.0-9a-f]*$/, "rows may only contain '.' and 0-f");
 
@@ -82,8 +101,9 @@ export const SpriteDocSchema = z
     rows: z.array(Row),
     meta: SpriteMetaSchema,
   })
-  // Cross-field: the grid has to actually be the shape it declares. A plain
-  // array schema cannot see `size`, so this has to be a refinement.
+  // Cross-field: the grid has to actually be the shape it declares, and every
+  // index in it has to be one the declared palette actually carries. A plain
+  // array schema can see neither `size` nor `palette`, so this is a refinement.
   .superRefine((doc, ctx) => {
     if (doc.rows.length !== doc.size.h) {
       ctx.addIssue({
@@ -92,6 +112,12 @@ export const SpriteDocSchema = z
         message: `expected ${doc.size.h} rows to match size.h, got ${doc.rows.length}`,
       });
     }
+    // Spec §6.3 amendment A4. `Row`'s pattern admits all of `0`-`f` because it
+    // cannot see the palette; a 4-colour `gameboy` doc carrying an `f` used to
+    // parse clean and only fail at the renderer, where `colors[15]` is
+    // `undefined`. Off-palette is refused here, repaired in `normalize`, and
+    // thrown on by `setPixel` — three jobs, three answers.
+    const paletteSize = doc.palette.colors.length;
     doc.rows.forEach((row, y) => {
       if (row.length !== doc.size.w) {
         ctx.addIssue({
@@ -99,6 +125,22 @@ export const SpriteDocSchema = z
           path: ["rows", y],
           message: `row ${y} has ${row.length} chars, expected ${doc.size.w} to match size.w`,
         });
+      }
+      for (let x = 0; x < row.length; x++) {
+        const c = row[x];
+        if (c === TRANSPARENT) continue;
+        const i = rowCharIndex(c);
+        if (i >= paletteSize) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["rows", y],
+            message:
+              `row ${y} char ${x} is '${c}', palette index ${i}, but palette ` +
+              `'${doc.palette.id}' has ${paletteSize} colors — valid characters ` +
+              `are '.' and 0-${HEX_CHARS[paletteSize - 1]}`,
+          });
+          break; // one issue per row: 256 copies of the same fault helps nobody
+        }
       }
     });
   });

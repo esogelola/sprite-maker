@@ -112,8 +112,21 @@ export function makeEmpty(w: number, h: number): Grid {
  *
  * Dropped rows raise `repairs` but cannot appear in `repairedRows` — they have
  * no index in the finished grid to point at.
+ *
+ * `paletteSize` is **required** — spec §6.3 amendment A4. An index at or past
+ * the end of the palette is repaired to `.` and charged exactly like an invalid
+ * character: a generator reaching past a 4-colour ramp is being sloppy in the
+ * way the other repair rules already forgive, and forgiving it costs a
+ * character rather than a regeneration. Making the parameter optional would let
+ * a caller silently keep the palette-blind behaviour that let an off-palette
+ * draft reach the renderer, where `palette.colors[i]` is `undefined`.
  */
-export function normalize(rows: string[], w: number, h: number) {
+export function normalize(
+  rows: string[],
+  w: number,
+  h: number,
+  paletteSize: number,
+) {
   const grid: Grid = [];
   const repairedRows: number[] = [];
   let repairs = 0;
@@ -129,13 +142,16 @@ export function normalize(rows: string[], w: number, h: number) {
         out += TRANSPARENT;
         rowRepairs++;
       } // too short
-      else if (c === TRANSPARENT || charIndex(c) >= 0) {
+      else if (c === TRANSPARENT) {
         out += c;
-      } // valid
+      } // transparent is valid at every palette size
+      else if (charIndex(c) >= 0 && charIndex(c) < paletteSize) {
+        out += c;
+      } // an index this palette actually has
       else {
         out += TRANSPARENT;
         rowRepairs++;
-      } // invalid char
+      } // invalid character, or an index past the palette (A4)
     }
     if (src.length > w) rowRepairs += src.length - w; // truncated
 
