@@ -1,0 +1,89 @@
+Transparency vs. opaque black — qwen3-vl probe
+==============================================
+Date:   2026-07-29
+Model:  qwen3-vl:8b-instruct-q4_K_M  (id 0533d74300e4, 6.1 GB, pulled 2026-07-29)
+Host:   Apple M2 Max, Ollama at http://localhost:11434/api/generate
+Why:    Prerequisite pull for Waves 5/7/10/13/14. The smoke test's wording
+        exposed a design defect, so it was chased down properly.
+
+REPRODUCTION
+------------
+All three probes build a PNG in-process with Python's zlib/struct (no deps)
+and POST it to /api/generate with stream:false. Scripts are in the session
+scratchpad; each image is described below precisely enough to rebuild.
+
+
+PROBE 1 — smoke test (what raised the flag)
+-------------------------------------------
+Image:  64x64 RGBA. A 32x32 square of #FF004D (PICO-8 index 8) centred on a
+        fully transparent field (alpha 0 everywhere else).
+Prompt: "What single shape and colour is in this image? Answer in under 10 words."
+
+RESPONSE: "Pink square on black background."
+          (7 eval tokens in 0.1s)
+
+The square and colour are right. The BACKGROUND IS NOT BLACK — it is
+transparent, alpha 0. That single word is the finding.
+
+
+PROBE 2 — isolating the claim
+-----------------------------
+Image:  64x64 RGBA, split down the middle.
+          left  half: fully transparent   (0,0,0,0)
+          right half: opaque black        (0,0,0,255)  <- PICO-8 index 0
+Prompt: "This image has a left half and a right half. Describe any
+         difference between them. Under 20 words."
+
+RESPONSE: "No visible differences; both halves are identical black backgrounds."
+
+CONCLUSION: transparent and opaque black are INDISTINGUISHABLE to the vision
+encoder. Not "hard to tell apart" — the model reports no difference at all.
+
+
+PROBE 3 — do mitigations work?
+------------------------------
+Image:  128x128 RGBA, 16x16 logical cells at 8px each. A diamond
+        (|cx-8| + |cy-8| <= 6) with a black outline at distance exactly 6
+        and a #FF004D fill inside. Three variants differ only in what fills
+        the region outside the diamond.
+Prompt: "Describe the shape you see and its outline. Under 15 words."
+
+  A  transparent (0,0,0,0)
+     -> "Pixelated diamond shape, bright pink, outlined in black against
+         dark background."
+
+  B  mid-grey (128,128,128)
+     -> "Pixelated red diamond with black border on gray background."
+
+  C  magenta (255,0,255)
+     -> "Pixelated red diamond with black border on pink background."
+
+
+READING THE RESULTS HONESTLY
+----------------------------
+Variant A still found the outline. That is not a contradiction of probe 2 --
+it survived because the diamond's FILL is bright red, so a strong edge exists
+one pixel inside the outline. Probe 2 is the clean statement of the underlying
+fact, because it has no bright fill to rescue it.
+
+The failure case is therefore a sprite whose OWN DARK PIXELS touch the
+background, where the silhouette boundary has no bright neighbour. That is the
+common case, not an edge case:
+  - pico-8  index 0 = #000000  (pure black)
+  - db16    index 0 = #140c1c  (near-black)
+A black-outlined character on transparency -- the standard pixel-art idiom --
+loses its entire silhouette boundary.
+
+Spec 4.4 assigns the IMAGE the gestalt job ("does this read as a fox?") and
+the TEXT the coordinates. An erased silhouette destroys precisely the gestalt,
+which is the one thing the image is for.
+
+B and C both fix it. C is correct but the model volunteers commentary on the
+background colour, which would pollute CritiqueReport.readsAs. B reads clean.
+
+RULING (user, 2026-07-29): composite onto a COMPUTED flat colour -- chosen per
+sprite for maximum luminance distance from the palette entries that sprite
+actually uses. Not a fixed grey: nes-16 and db16 both carry mid-greys, and a
+hardcoded background would reintroduce the same erased boundary for any sprite
+using them. Consequences: render.ts gains a background option (Wave 4);
+critique.ts computes the colour (Wave 7); spec 4.4 and 6.8 amended.
