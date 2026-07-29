@@ -315,7 +315,7 @@ Capped at `maxReviseTurns`. Every call routes through `shared/grid.ts`. A reject
 
 **A turn with zero tool calls counts against the cap** and injects a `user` nudge naming the three tools. This is the most common qwen3 tool-loop behavior, and it was previously undefined: counting only tool-firing turns spins forever on an identical message array, while exiting silently means the cap is not honoured.
 
-**The revise stage binds to `models.generator`.** `HarnessConfig.models` has two roles and three stages consume models; this pins the third. Its system prompt carries `/no_think` — 40 turns each emitting a reasoning block is the single largest latency risk in the design.
+**The revise stage binds to `models.generator`.** `HarnessConfig.models` has two roles and three stages consume models; this pins the third. Its calls are sent with **`think: false`** (amendment A8) — 40 turns each emitting a reasoning block is the single largest latency risk in the design, and the `/no_think` prefix v2 specified was measured to do nothing about it.
 
 `revise()` returns a `Grid` plus `{ turns, hitCap, summary }`. It does **not** return a `SpriteDoc` — see §6.2 on `meta` ownership.
 
@@ -425,7 +425,11 @@ interface OllamaClient {
 
 **`vision` takes `options` and `format`.** Without them the critic cannot be seeded or temperature-controlled, which makes the bench — the instrument that exists to tune the confidence floors — non-reproducible no matter what the config records. `format: "json"` is also the cheapest available mitigation for malformed critique output.
 
-Errors: `OllamaUnreachableError(endpoint)`, `OllamaTimeoutError(model, elapsedMs)`.
+**Every request carries an optional top-level `think?: boolean`** (amendment A8). It is a first-class request field, not an `options` key — Ollama ignores unknown keys in the options bag, so putting it there silently does nothing. `generate`, `vision` and `chatWithTools` all accept it, and the draft and revise stages pass `false`.
+
+Errors: `OllamaUnreachableError(endpoint)`, `OllamaTimeoutError(model, elapsedMs)`, `OllamaHttpError(endpoint, status, model, body)`.
+
+`OllamaHttpError` covers any non-2xx. Nothing branches on it — it exists because *something* must be thrown, and a bare `Error` would discard the status and endpoint that §9's "bound model not installed" row requires the message to name. On a 404 the message includes the `ollama pull <model>` command that fixes it.
 
 ---
 
@@ -507,9 +511,23 @@ Feedback is recorded in `Round.userFeedback`, and the resulting round's `parentI
 
 ### 7.4 Prompt strategy
 
-- **Draft** — encoding rules, canvas dimensions, the palette as an indexed table, two short worked examples. Prefixed `/no_think`. The model must emit `{ intent: { subject, … }, rows: [...] }`; `parseDraft` never throws, and unparseable output degrades to `rows: []`, which §6.3 charges as `w × h` repairs and routes into the existing retry path.
+- **Draft** — encoding rules, canvas dimensions, the palette as an indexed table, two short worked examples. Sent with **`think: false`** (amendment A8). The model must emit `{ intent: { subject, … }, rows: [...] }`; `parseDraft` never throws, and unparseable output degrades to `rows: []`, which §6.3 charges as `w × h` repairs and routes into the existing retry path.
 - **Critique** — the upscaled PNG, the raw row text, and the intent. Image for gestalt, text for coordinates. `format: "json"`.
-- **Revise** — the filtered issue list, the current grid as text, three tools. Prefixed `/no_think`.
+- **Revise** — the filtered issue list, the current grid as text, three tools. Sent with **`think: false`** (amendment A8) — this is the stage where it matters most.
+
+**Amendment A8 — `/no_think` does not work; use the top-level `think: false` field.** Measured against `qwen3:8b` on Ollama 0.32.1, temperature 0, two prompts (capture: `captures/2026-07-29-wave-5-think-suppression.txt`):
+
+| Method | eval tokens | `thinking` chars |
+|---|---|---|
+| no suppression | 157 / 372 | 667 / 1433 |
+| **`/no_think` prefix** — what v2 specified | **340 / 393** | **1527 / 1465** |
+| **top-level `think: false`** | **3 / 14** | **0 / 0** |
+
+The prefix is not merely inert — output is statistically indistinguishable from sending nothing, and on one prompt it was worse. Qwen 3 keeps reasoning; Ollama 0.32 simply routes the trace into a separate `thinking` field, so a parser reading `response` sees clean output and the tokens are paid invisibly. **`options: { think: false }` also does not work** — Ollama ignores unknown keys in the options bag. Only the top-level request field suppresses.
+
+This is a **26–50× reduction in generated tokens**, and it compounds worst exactly where §7.4 already identified the largest latency risk: Wave 8's revise stage runs up to 40 turns per round, up to 3 rounds. At the measured 28.4 tok/s that is minutes of pure overhead per run.
+
+Consequences: §3's throughput figure and §6.8's `callTimeoutMs` scaling were both derived while paying for reasoning tokens nobody was reading, and §12's round-cap justification inherits that error. Re-derive all three once `Round.timings` has real data.
 
 ### 7.5 Round numbering and `meta` ownership
 

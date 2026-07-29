@@ -1,0 +1,90 @@
+Qwen 3 thinking suppression — /no_think vs think:false
+======================================================
+Date:   2026-07-29
+Model:  qwen3:8b  (id 500a1f067a9f, q4_K_M)
+Server: Ollama 0.32.1, http://localhost:11434/api/generate
+Why:    Spec 7.4 (v2) specified prefixing prompts with "/no_think".
+        A Wave 5 finding suggested Ollama 0.32 routes reasoning into a
+        separate `thinking` field rather than suppressing it. Measured
+        directly, by the orchestrator and independently by the Wave 5
+        reviewer, because the draft and revise stages both depend on it.
+
+RESULT: /no_think DOES NOT SUPPRESS ANYTHING. Only the top-level
+        `think: false` request field works.
+
+
+ORCHESTRATOR MEASUREMENT — trivial prompt
+-----------------------------------------
+Prompt: "Reply with exactly the word: OK"   (num_predict 300)
+
+  method                       eval_tokens   wall     thinking chars
+  no suppression                    94       8.0s          376
+  "/no_think " prefix               65       1.6s          257
+  top-level think:false              2       0.3s            0
+
+Response text was "OK" in all three cases.
+
+
+REVIEWER MEASUREMENT — two prompts, temperature 0
+-------------------------------------------------
+  method                       eval_count        thinking chars
+  no suppression                157 / 372          667 / 1433
+  "/no_think " prefix           340 / 393         1527 / 1465
+  top-level think:false           3 /  14            0 /    0
+
+Note the prefix row: on these prompts it produced MORE tokens than
+sending nothing at all. The prefix is not a weak suppressor. It is
+inert, and the variation is noise.
+
+Same result reproduced on /api/chat.
+
+
+ALSO TESTED AND REJECTED
+------------------------
+  options: { think: false }   ->  372 eval / 1433 thinking chars
+                                  identical to no suppression.
+
+Ollama silently ignores unknown keys inside the options bag, so this
+spelling looks plausible, type-checks against a Record<string,unknown>,
+and does nothing. Only the TOP-LEVEL request field works:
+
+  { "model": "...", "prompt": "...", "stream": false, "think": false }
+
+
+WHY THIS WAS INVISIBLE
+----------------------
+Ollama 0.32 splits the reply into two fields: `thinking` and `response`.
+A parser that reads `response` - which is what parseDraft does, and
+correctly so - sees clean output with no <think> block and concludes the
+suppression worked. The tokens are generated, billed in eval_count, and
+paid for in wall-clock, but never appear in the value under inspection.
+
+The v2 spec recorded the benign half of this ("parseDraft never sees a
+<think> block") as an upside and never noticed the cost.
+
+
+IMPACT
+------
+26-50x reduction in generated tokens on these prompts.
+
+It compounds worst exactly where spec 7.4 already named the largest
+latency risk in the design: the revise stage runs up to 40 tool-calling
+turns per round, up to 3 rounds. Every one of those turns was paying for
+a reasoning trace nobody reads.
+
+Three spec figures were derived while paying this cost and are now
+suspect:
+  - section 3's 28.4 tok/s throughput
+  - section 6.8's callTimeoutMs area scaling
+  - section 12's round-cap justification ("several minutes")
+
+All three should be re-derived from Round.timings once Wave 13's bench
+produces real data.
+
+
+RULING
+------
+Amendment A8. The OllamaClient request shape gains a top-level
+`think?: boolean` on generate, vision and chatWithTools. The draft and
+revise stages pass false. The /no_think prefix is removed from the spec
+so nobody re-adds it believing it helps.
