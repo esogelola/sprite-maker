@@ -225,7 +225,7 @@ export function setPixel(g: Grid, x: number, y: number, ch: string, paletteSize:
 **Acceptance criteria:**
 1. `npm test` green; grid suite has ≥ 20 assertions.
 2. `setPixel` on a `gameboy` doc (`paletteSize = 4`) with `ch = "9"` throws `GridError` with `code === "off-palette"` — reviewer verifies by execution, not inspection.
-3. `normalize(["ab"], 4, 1)` returns `repairs === 4` (2 invalid chars → transparent, 2 pad) and `grid === ["...."]`. Reviewer runs this exact call.
+3. `normalize(["ab"], 4, 1)` returns `repairs === 2` (2 pad) and `grid === ["ab.."]`. Reviewer runs this exact call. **Amendment P5:** this criterion originally asserted `repairs === 4` and `["...."]`, reasoning "2 invalid chars → transparent, 2 pad". That was wrong — `a` and `b` are palette indices 10 and 11 per spec §6.1, so they survive. The plan contradicted itself while the spec and the plan's own literal `normalize` agreed. `normalize(["AB"], 4, 1)` → `["...."]` with `repairs === 4` is the case the original arithmetic actually described, and both are now pinned by tests.
 4. `setPixel` does not mutate its input — reviewer asserts the original grid is unchanged after the call.
 5. No imports from `main/`, `renderer/`, `electron`, `fs`, or `node:*` in `grid.ts`.
 6. Only Wave 2 whitelist files touched.
@@ -237,6 +237,10 @@ export function setPixel(g: Grid, x: number, y: number, ch: string, paletteSize:
 **Goal:** The deterministic half of the review system, implementing spec §6.5 definitions exactly.
 
 **Interfaces produced:** `export function lint(doc: SpriteDoc): LintReport`
+
+**Amendment P6 — neighbour reads.** `orphan-pixel` and `outline-gap` are defined with "out-of-canvas counts as transparent", but `shared/grid.ts`'s `getPixel` **throws** on out-of-bounds, matching `setPixel`'s strictness. `lint.ts` must therefore define its own lenient neighbour read (a local `at(g, x, y)` returning `TRANSPARENT` outside the canvas) rather than discovering this through a thrown error mid-implementation. Do not add a lenient reader to `grid.ts` — it is out of this wave's whitelist, and strictness is correct there.
+
+**Amendment P7 — `errors` element shape.** Per spec amendment A2, `LintReport.errors` uses the same `{ code, cells, message }` shape as `warnings`.
 
 **The five warning codes are given literally**, because the spec forbids the implementation inventing others:
 
@@ -374,6 +378,10 @@ export class DraftRejectedError extends Error { constructor(public repairs: numb
 
 The draft system prompt is prefixed `/no_think`, states the encoding rules, gives the palette as an indexed table, and includes two short worked examples. `parseDraft` tolerates fenced code blocks and prose around the JSON.
 
+**Amendment P8 — the threshold is a ratio, and it is not bounded by 1.0.** Per spec amendment A5, compute `repairs / (w × h) > cfg.repairRejectThreshold`. `meta.repairs` can exceed the cell count: 100 rows returned for a 16×16 canvas charges 1344 repairs against 256 cells (525%) even when every surviving row is pristine. Do not write the check as a percentage clamped to 100, and do not assume `repairs <= w*h`.
+
+**Amendment P9 — palettes are `readonly`.** `palettes.ts` exposes `colors: readonly string[]` (they are frozen singletons), while `PaletteRefSchema` infers `string[]`. Copy when building a `SpriteDoc`: `colors: [...palette.colors]`. Aliasing will fail `tsc`.
+
 **Steps:**
 
 - [ ] **6.1** Write `tests/main/draft.test.ts` **first**, driving `draft()` with the Wave 5 stub: a clean response yields `repairs === 0`; a response with three short rows yields the right `repairs` count and a valid doc; a response exceeding `repairRejectThreshold` triggers **exactly one** retry (assert the stub recorded 2 calls) and the retry prompt contains the misalignment description; a second over-threshold response throws `DraftRejectedError` carrying the raw output; `buildDraftPrompt` output contains `/no_think` and every palette index with its hex.
@@ -455,6 +463,8 @@ export async function revise(
 ```
 
 An invalid tool call returns an error **string** to the model as a tool result — never a throw — and still counts against `maxReviseTurns`.
+
+**Amendment P10 — coerce `index` before dispatching.** §6.6 types `place_pixel`'s index as `number | "."`, but a model routinely emits JSON `"3"` as a string. Uncoerced, that reaches `indexChar` and returns `GridError("bad-char")` — a technically correct rejection of well-formed intent, which burns turns against the cap. Coerce numeric strings to numbers in the tool handler before validating. `GridError` codes from `indexChar`: non-integer → `bad-char`, integer outside 0–15 → `off-palette`.
 
 **Steps:**
 

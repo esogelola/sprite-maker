@@ -146,7 +146,7 @@ Each palette carries **4 to 16 entries** — 16 is the ceiling imposed by the en
 | `nes-16` | 16 | Curated 16-color subset of the 54-color NES master palette |
 | `gameboy` | 4 | Original DMG green ramp |
 
-A palette with fewer than 16 entries simply makes indices beyond its length invalid; `shared/grid.ts` rejects them like any other off-palette index.
+A palette with fewer than 16 entries makes indices beyond its length invalid. Those are caught in three distinct places, and the distinction matters — see amendment A4 in §6.3: `setPixel`/`fillRow` **throw** on the mutation path, `normalize` **repairs** on the draft path, and `SpriteDocSchema` **refuses** on the parse path.
 
 ### 6.2 `SpriteDoc`
 
@@ -190,8 +190,18 @@ A palette with fewer than 16 entries simply makes indices beyond its length inva
 | Row too long | Truncate |
 | Too few / too many rows | Pad with empty rows / truncate |
 | Invalid character | Map to `.` |
+| **Index at or beyond the palette length** | **Map to `.` — amendment A4** |
 
 Every repair increments `meta.repairs`, which is the honest quality signal for the draft. If repairs exceed `repairRejectThreshold` (default 20% of cells), the draft is rejected and retried once with the specific misalignment described back to the model. A sprite needing 300 repairs is noise; accepting it silently would make the critic chase problems the generator caused.
+
+**Amendment A4 — off-palette indices.** The original spec claimed in §6.1a that `shared/grid.ts` "rejects [off-palette indices] like any other off-palette index." That was false, and the gap was reachable on the very first small-palette generation: `normalize` took no palette size, so a 4-colour `gameboy` draft containing `f` survived repair, then passed `SpriteDocSchema` — whose row pattern permits all of `0`–`f` regardless of palette — and reached the renderer, where `palette.colors[15]` evaluates to `undefined`. `setPixel` did guard this, but it guards the *mutation* path, not the *parse* path, and a draft never touches `setPixel`.
+
+Caught in two places, because repair and validity are different jobs:
+
+1. **`normalize` takes `paletteSize`** and maps out-of-range indices to `.`, charging a repair. A generator that reaches past a 4-colour ramp is being sloppy in exactly the way the other repair rules already forgive, and forgiving it costs a character rather than a 30-second regeneration.
+2. **`SpriteDocSchema` gains a cross-field refinement** requiring every row character to index within `palette.colors.length`. This makes an off-palette `SpriteDoc` unrepresentable — including one loaded from disk, which no amount of care inside `normalize` would cover.
+
+**Amendment A5 — `repairs` is not a percentage.** `repairRejectThreshold` is described above as "20% of cells", but `meta.repairs` is unbounded relative to the cell count: a model returning 100 rows for a 16×16 canvas charges `(100 − 16) × 16 = 1344` repairs against 256 cells — 525% — even when all 16 surviving rows are pristine. The rejection is still correct (the model misunderstood the canvas shape), but implementations must compute `repairs / (w × h) > threshold` and must **not** assume the ratio is bounded by 1.0.
 
 ### 6.4 `CritiqueReport`
 
