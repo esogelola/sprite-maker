@@ -739,6 +739,8 @@ Bench: `"bench": "tsx bench/run.ts"` (add `tsx`; add `bench/**` to `tsconfig.jso
 
 CSV columns: `prompt, size, palette, generator, critic, ok, error, repairs, repairPct, rounds, stopReason, orphanCount, paletteUsed, symmetryScore, draftMs, critiqueMs, reviseMs, totalMs, reviseTurns, hitCap`.
 
+**`totalMs` is wall-clocked around the `run()` call, not summed from `Round.timings`.** No field anchors a run's total: summing the per-round timings yields **0** for a draft-rejected run — exactly the row whose duration you most want — and omits retry and orchestration time. This does not conflict with AC3, which forbids deriving *per-stage* timings from events; per-stage still comes from `Round.timings`.
+
 `ok` and `error` exist because spec §11's first bar is "completes without crash" and v1's CSV had no way to express the failure it was measuring.
 
 - [ ] **13.1** Write `tests/main/export.test.ts` first: `exportPng(doc32, 8, path)` writes 256×256; scale 3 rejected. **13.2** Run. FAIL. **13.3** Implement; wire the Export button and the IPC handler, replacing Wave 10's `not-implemented` stub. **13.4** Run. PASS.
