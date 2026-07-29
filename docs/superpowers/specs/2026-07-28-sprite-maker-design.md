@@ -295,6 +295,8 @@ The `i < j` and transparent-exclusion clauses are load-bearing: `i === j` has Δ
 
 Relative luminance uses the standard sRGB formula: linearize each channel (`c <= 0.04045 ? c/12.92 : ((c+0.055)/1.055)^2.4`), then `0.2126R + 0.7152G + 0.0722B`. **Do not reimplement it with rounding.** `gameboy` indices 2 and 3 sit at Δ = 0.0794 against the 0.08 threshold — a 0.8% margin, and the canary for any change to this formula.
 
+**Amendment A7 — the formula lives in `shared/color.ts`.** "Do not reimplement it" is a rule that placement can quietly break. Wave 3 shipped `relativeLuminance` from `main/lint.ts`, which is correct code in a location that guarantees the defect: **`main/*` is unreachable from the renderer bundle**, since a value import drags `node:http` in behind it — the same reason §5.2 moved `PipelineState` and friends into `shared/`. The first time the UI needs contrast (swatch borders, a legible canvas overlay), it cannot import `@main/lint`, so someone writes a second copy. `shared/color.ts` owns the formula and the `0.08` threshold, and `lint.ts`, `render.ts`, `pickCriticBackground` and the renderer all import from there. Wave 4 relocates it.
+
 `symmetryScore` is the fraction of non-transparent cells whose mirror about the **vertical centre axis** holds the same index. **A sprite with no non-transparent cells scores 1** — a blank canvas is trivially symmetric. Without this, an all-transparent sprite yields `0/0 = NaN`, which fails the schema bounds and serializes to `null`, surfacing as an opaque round-trip failure two stages from its cause. It is reachable: a model returning 16 rows of dots gets there with `repairs === 0`.
 
 `symmetryScore` is reported, never a warning — plenty of good sprites are deliberately asymmetric.
@@ -599,12 +601,23 @@ A fixed eval set of ten prompts (flower, dog, sword, tree, house, fox, chest, po
 |---|---|---|
 | Completes without crash | 10 / 10 | `SessionHistory.outcome === "completed"` |
 | Median `meta.repairs` | < 5% of cells | `rounds[0].doc.meta.repairs / (w × h)` |
-| Zero lint **warnings of severity** on the final sprite — no orphans, no outline gaps | 10 / 10 | `rounds.at(-1).lint.warnings` |
+| Zero **structural** lint warnings on the final sprite | 10 / 10 | `rounds.at(-1).lint.warnings.filter(w => STRUCTURAL_LINT_CODES.includes(w.code)).length === 0` |
 | Converges before the round cap | ≥ 5 / 10 | `stopReason === "no-high-severity"` |
 | Critic actually ran | 10 / 10 | `stopReason !== "critic-failed"` |
 | Human rating ≥ 3/5 | ≥ 6 / 10 *(provisional)* | the human |
 
 Every objective bar names the persisted field it is read from. In v1 three of them were unmeasurable from the artifact: `outcome` and `stopReason` did not exist, and "linter errors" referred to a `LintReport.errors` field that nothing could ever populate (§6.5) — so the bar would have read `0/10` unconditionally and told us nothing.
+
+**Amendment A6 — structural vs advisory lint codes.** The v2 rewrite of the row above replaced one unmeasurable bar with another. It read "zero lint **warnings of severity**", filtering on a severity field that `LintWarning` does not have and never had. Worse, the unfiltered form is not merely imprecise but always false: `low-contrast` and `unused-palette-entry` fire on essentially every real sprite. Measured during Wave 3 — a structurally perfect 32×32 pico-8 sprite emits **14 warnings** with zero orphans and zero gaps, and even a sprite using all sixteen indices still emits 6, because **pico-8 itself contains 15 sub-threshold index pairs**. Every bundled 16-colour palette is in the same position.
+
+The five codes split in two, and the split is exported from `shared/schema.ts` as `STRUCTURAL_LINT_CODES` so that §7, §11, the bench and the human gate all filter identically rather than each hardcoding two strings:
+
+| Class | Codes | Meaning |
+|---|---|---|
+| **Structural** | `orphan-pixel`, `outline-gap` | Defects in the sprite. These gate acceptance |
+| **Advisory** | `low-contrast`, `unused-palette-entry`, `row-repaired` | Facts about the palette's shape or the draft's provenance, not faults in the sprite. Reported, never gating |
+
+A single `warnings.length` cannot express this bar, so the bench emits **per-code counts as separate columns** rather than one total.
 
 The `critic-failed` bar is new and matters most: without it, a run where the critic never parsed reports `no-high-severity` and scores as a *success* on the convergence bar.
 
