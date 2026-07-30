@@ -1,0 +1,141 @@
+Generator capability benchmark — can a local 8B model draw pixel art?
+=====================================================================
+Date:   2026-07-30
+Host:   Apple M2 Max, 32 GB. Ollama 0.32.1.
+Why:    Wave 10 booted the app. Its first real generation timed out at
+        30,005 ms and rendered a 6-wide vertical bar of index 0 instead
+        of a fox. Spec 12 says the critic thresholds are first guesses
+        to be tuned by the bench; this measures the stage upstream of
+        them, because a critic cannot fix a generator that never drew.
+
+HEADLINE: qwen3:8b cannot draw pixel art. Neither can any locally
+          installed 8B model at usable quality. This is not a prompt,
+          format, temperature or example-size problem — all four were
+          tested and eliminated.
+
+
+1. THE SHIPPED PATH — six runs through buildDraftPrompt + parseDraft
+--------------------------------------------------------------------
+label                       ms      evalTok  thinkChars  repair%  colours  verdict
+A think:false 16 pico-8     20386   229      0           0.00     1        DEGENERATE
+B think ON    16 pico-8     196885  3774     11658       0.52     1        REJECTED
+C think:false 16 gameboy    8297    108      0           0.50     0        REJECTED
+D think:false 32 pico-8     13943   194      0           0.18     0        DEGENERATE
+E think:false 16 (repeat)   9839    108      0           0.00     0        DEGENERATE
+F qwen3:4b    16 pico-8     123894  4096     0           1.00     0        REJECTED
+
+ZERO of six produced a usable sprite.
+
+Two side findings from this table:
+  - A8 confirmed again, and bigger than measured before: thinking ON
+    cost 196.9s vs 20.4s for the same task - roughly 10x - and was
+    STILL rejected. think:false shows 0 thinking chars everywhere.
+  - qwen3:4b hit the 4096-token cap and returned 100% repairs. It is
+    not a fallback.
+
+
+2. WHY IT FAILED — the raw reply
+---------------------------------
+Valid JSON. Correct intent. Correct ROW COUNT. Wrong row WIDTH:
+
+  "........................"        <- 24 chars
+  "....................00"          <- 22 chars, x15
+
+normalize() truncates each row to 16, and every drawn cell sat past
+column 16, so the whole sprite was discarded as transparent. The bar of
+0s in the screenshot is the same failure with a different reply.
+
+
+3. WHAT FIXED THE WIDTH, AND WHAT IT BROKE
+-------------------------------------------
+Ollama accepts a full JSON Schema as `format`, which constrains
+DECODING rather than asking the model to count:
+
+  rows: { type:"array", minItems:16, maxItems:16,
+          items:{ type:"string", pattern:"^[.0-9a-f]{16}$" } }
+
+  plain json          16 rows, all exactly 16 chars, 0 colours
+  SCHEMA-constrained  16 rows, all exactly 16 chars, 0 colours
+
+Width solved permanently - it is now a decoder invariant. But the model
+then draws NOTHING: 16 well-formed empty rows, the cheapest output that
+satisfies the grammar.
+
+The two formats fail in opposite directions:
+  unconstrained -> content at wrong widths
+  constrained   -> correct widths with no content
+
+
+4. ELIMINATED AS CAUSES
+------------------------
+  8x8 examples vs a 16x16 canvas   16x16 example: still all dots
+  temperature                       0.4 and 0.8: still all dots
+  JSON overhead                     plain text rows: still degenerate
+  palette                           pico-8 and gameboy both fail
+
+
+5. THE DECIDING TEST — most forgiving format possible
+------------------------------------------------------
+No JSON, no schema, "8 lines of 8 characters", plain text:
+
+  qwen3:8b  8x8  fox     00000000  x8            solid rectangle
+  qwen3:8b 16x16 fox     8888888888888888 x16    solid rectangle
+  qwen3:8b  8x8  heart   88888888 x8             solid rectangle
+
+Widths correct. It CAN count. It cannot draw.
+
+
+6. MODEL COMPARISON — same task, same prompt
+---------------------------------------------
+  qwen3:8b                     hollow rectangle (border + fill)
+  qwen3-vl:8b-instruct-q4_K_M  tapered, symmetric, varying widths
+  qwen3:4b                     no grid at all
+  llama3.2                     no grid at all
+
+  qwen3-vl's 8x8 heart attempt:
+      ....0....
+      ....0....
+      ...0000...
+      ..000000..
+      .00000000.
+      .00000000.
+      ..000000..
+      ....0....
+
+Not a heart, but genuine spatial structure - and the CRITIC model
+outdrew the GENERATOR. A vision-language model has spatial priors a
+pure text model lacks. Its widths were wrong (9-10 for an 8 canvas),
+which is exactly the problem section 3 already solved.
+
+
+7. THE COMBINATION — VL model + schema-constrained format
+----------------------------------------------------------
+  qwen3-vl 16x16 fox     187tok  coverage 0.46  distinctRows 6/16
+  qwen3-vl 16x16 heart   187tok  coverage 0.46  distinctRows 6/16
+  qwen3-vl 32x32 fox     378tok  coverage 0.20  distinctRows 29/32
+  qwen3:8b 16x16 heart    89tok  coverage 0.00  distinctRows 1/16
+
+Correct dimensions, real variation, one colour, and the content is
+STRUCTURED NOISE - scattered single pixels and repeating vertical
+stripes, not a recognisable subject.
+
+Best available local combination is still not usable output.
+
+
+CONCLUSION
+----------
+The design assumed (spec 4.1) that replacing per-pixel placement with
+whole-canvas batch emission would let a local 8B model draw coherently.
+The latency argument for that replacement was correct and remains so.
+The capability assumption was not tested until now, and is false.
+
+What IS proven to work, and should be kept regardless of what happens
+to the generator:
+  - schema-constrained `format` makes row width a decoder invariant
+  - think:false (A8) is worth ~10x on this workload
+  - a VL model has spatial ability a same-size text model does not
+  - the whole harness: 1138 tests, the pipeline, repair, lint, critique
+
+What is NOT proven: that any locally-runnable model can draw a sprite
+worth critiquing. That is now the project's open question, and every
+downstream wave (11-14) assumes it.
