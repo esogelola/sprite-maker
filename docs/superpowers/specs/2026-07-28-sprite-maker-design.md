@@ -194,6 +194,54 @@ Indices beyond a palette's length are caught in three distinct places, and the d
 
 **`repairedRows`** is required because §6.5's `row-repaired` warning is defined per repaired row, and which rows were repaired is knowable only at parse time: once the grid exists, a repaired row is indistinguishable from one the model got right.
 
+### 6.2a The draft is composed, not written — amendment A10
+
+**Amendment A10 supersedes §4.1's choice of whole-canvas emission for the draft stage.** §4.1 framed the decision as a binary — one grid in one inference, versus ~600 `place_pixel` calls — and picked the grid on latency grounds. That arithmetic was correct and stands. The binary was false.
+
+**Measured (captures `2026-07-30-generator-capability-benchmark.txt` and `2026-07-30-shape-dsl-benchmark.txt`):** no locally-runnable model can write the grid. `qwen3:8b` returns a solid rectangle in the most forgiving format available — plain text, no JSON, "8 lines of 8 characters." Prompt, temperature, example size and palette were each eliminated as causes. The observed failure in the shipped path was rows of 24 and 22 characters where 16 were required, which `normalize` truncated, discarding every drawn cell past column 16.
+
+**The third option: the model emits 8–20 shape operations and an interpreter draws them.**
+
+```ts
+type DrawOp =
+  | { op: "ellipse";   cx: number; cy: number; rx: number; ry: number; index: string }
+  | { op: "fill_rect"; x0: number; y0: number; x1: number; y1: number; index: string }
+  | { op: "line";      x0: number; y0: number; x1: number; y1: number; index: string }
+  | { op: "mirror_x";  axis: number }
+  | { op: "clear";     x0: number; y0: number; x1: number; y1: number }
+```
+
+The model reasons about placement, which the benchmark shows it *can* do — a VL model drew tapered, symmetric structure unprompted. The interpreter does the cell bookkeeping, which the benchmark shows the model *cannot* do. Each job goes to whichever party is competent at it.
+
+The same `qwen3-vl:8b` that produced structured noise writing a grid produced a recognisable 5-colour fox — ears, eyes, body, legs, correct margin — composing 13 operations. Same model, same palette, same subject.
+
+Three properties fall out rather than being designed in:
+
+- **Row width stops being a concept.** There is no width to get wrong, so §6.3's length repairs become unreachable on the draft path.
+- **`mirror_x` gives symmetry free**, and every benchmark run reached for it. Character sprites are mostly symmetric, so this removes the hardest part of drawing one.
+- **A wrong sprite is a readable op list**, which a human can inspect and the revise stage can amend surgically.
+
+**`place_pixel` and `fill_row` keep their place in `REVISE`** (§6.6), where the critic has named a specific defect and per-cell control is what's wanted. The DSL is for `DRAFT`, where the model must compose.
+
+### 6.2b The gauge loop — amendment A11
+
+The draft runs as a **bounded, harness-gated loop**, not a single inference. After each batch of operations the model is shown the canvas so far plus its measurements — coverage, colour count, bounding box, distinct row count — and continues.
+
+Measured over three subjects: the gauge loop scored **3/3 usable against one-shot's 2/3**, at roughly 2× time and tokens. It rescued a failure the one-shot produced (a two-colour heart) and turned a monochrome green blob into foliage with a visible trunk and four colours. That is the specific failure it exists to catch: the model commits to one fill and never notices it has made a mass.
+
+But on the subject the one-shot already drew well, five further batches produced a *simpler*, worse sprite. Reliability is what the loop buys; quality is not.
+
+**Therefore the harness owns the stop decision, not the model.** In the benchmark the model never once set `done: true` — it consumed every available batch. The loop exits as soon as the gauge clears the bar:
+
+```
+draftGaugeBar = { minColours: 3, minCoverage: 0.12, maxCoverage: 0.80, minDistinctRows: 8 }
+maxDraftBatches = 5
+```
+
+A first batch that clears the bar costs one inference; only a weak draft pays for more. This is §7.1's principle applied one level down — deterministic control, agentic content.
+
+The model may still set `done: true` early, and an empty `ops` array is treated as "no further progress" and stops the loop.
+
 ### 6.3 Row repair
 
 `qwen3:8b` emits malformed rows routinely, not occasionally — especially at 64×64. This is expected input, not an error:
@@ -409,7 +457,16 @@ Without the second phase, `revise` and `reviseMs` are permanently `null` on ever
 
 **`criticTargetPx` replaces `criticUpscale`.** §4.4 asks for an upscale to *approximately 512px*; a fixed multiplier of 16 gives 16×16 → 256px and 64×64 → **1024px**, the latter downsampled back by the vision encoder at several times the image-token cost. Compute `scale = max(1, floor(criticTargetPx / size.w))`.
 
-**`callTimeoutMs` scales with canvas area.** The effective timeout is `callTimeoutMs × (w × h) / (32 × 32)`. A 64×64 draft is 4,096 grid characters plus intent JSON at the measured 28.4 tok/s — comfortably into three digits of seconds, so a flat 120s would abort legitimate drafts.
+**`callTimeoutMs` scales with canvas area, above a floor.** The effective timeout is `max(callTimeoutFloorMs, callTimeoutMs × (w × h) / (32 × 32))`.
+
+**Amendment A12 — the floor exists because pure area scaling made the smallest canvas the tightest deadline.** Found live in Wave 10: a 16×16 got `120000 × 256/1024 = 30s` per call, which a `qwen3:8b` revise turn exceeds, so **every 16×16 run ended `FAILED` after round 1** — that was the app's first real generation. Meanwhile a cold model load consumed a 32×32's entire 120s draft budget, producing `rounds: []`.
+
+Two things the original scaling did not account for:
+
+- **Cold start is not proportional to canvas area.** Loading a 6–19 GB model costs 8–25 s regardless of what is being drawn, and on the smallest canvas that is most of the budget. `callTimeoutFloorMs` defaults to **45000** so a cold start cannot consume a whole call.
+- **The base was derived from a throughput figure measured while paying for reasoning tokens nobody read** (amendment A8). It is optimistic by roughly the factor A8 recovers.
+
+Under A10 the draft emits 8–20 operations rather than `w × h` characters, so **draft cost no longer scales with canvas area at all** — a 64×64 sprite is about as many ops as a 16×16. Area scaling now describes only the `REVISE` stage, where per-cell edits genuinely do grow with the canvas. Re-derive both numbers from `Round.timings` once the bench has data.
 
 **`run()` re-parses its config on entry.** The schema's guards are worthless if a caller can hand-build `{...DEFAULT_HARNESS_CONFIG, maxRounds: 0}` and bypass them.
 
