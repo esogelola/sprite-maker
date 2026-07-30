@@ -968,6 +968,11 @@ describe("HarnessConfigSchema", () => {
       seed: null,
       temperature: 0.6,
       draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
+      reviseRegressionBar: {
+        maxSymmetryDrop: 0.15,
+        maxOrphanIncrease: 0,
+        maxCoverageDrop: 0.25,
+      },
       models: {
         generator: "qwen3-vl:8b-instruct-q4_K_M",
         critic: "qwen3-vl:8b-instruct-q4_K_M",
@@ -1173,6 +1178,75 @@ describe("HarnessConfigSchema", () => {
     ).toBe(false);
     expect(
       HarnessConfigSchema.safeParse({ draftGaugeBar: { minDistinctRows: 0 } }).success,
+    ).toBe(false);
+  });
+
+  // -- A14: the revise regression bar --------------------------------------
+
+  it("defaults reviseRegressionBar to the three A14 figures", () => {
+    expect(HarnessConfigSchema.parse({}).reviseRegressionBar).toEqual({
+      maxSymmetryDrop: 0.15,
+      maxOrphanIncrease: 0,
+      maxCoverageDrop: 0.25,
+    });
+  });
+
+  it("KEEPS maxOrphanIncrease: 0 as the shipped default — 'no new orphans'", () => {
+    // Pinned as its own named assertion rather than left to the field-for-field
+    // comparison, and this is the falsy-zero field of A14. `0` is the correct
+    // default and it means "no new orphans at all"; every `||` or truthiness
+    // read of it turns the shipped guard into a no-op, and a no-op guard is
+    // decoration. A default of `undefined`, or any positive number arrived at
+    // to "avoid the zero", is a silent weakening.
+    expect(DEFAULT_HARNESS_CONFIG.reviseRegressionBar.maxOrphanIncrease).toBe(0);
+    expect(HarnessConfigSchema.parse({}).reviseRegressionBar.maxOrphanIncrease).toBe(0);
+    // Explicitly supplied, which is the spelling a bench run would use.
+    expect(
+      HarnessConfigSchema.parse({ reviseRegressionBar: { maxOrphanIncrease: 0 } })
+        .reviseRegressionBar.maxOrphanIncrease,
+    ).toBe(0);
+  });
+
+  it("accepts a zero on either fractional threshold too", () => {
+    // `0` on a *drop* bar is the strictest legal setting — "no drop at all" —
+    // and is exactly the value a falsy check would read as absent.
+    const cfg = HarnessConfigSchema.parse({
+      reviseRegressionBar: { maxSymmetryDrop: 0, maxCoverageDrop: 0 },
+    });
+    expect(cfg.reviseRegressionBar.maxSymmetryDrop).toBe(0);
+    expect(cfg.reviseRegressionBar.maxCoverageDrop).toBe(0);
+  });
+
+  it("fills a partial reviseRegressionBar rather than dropping the other two", () => {
+    const cfg = HarnessConfigSchema.parse({ reviseRegressionBar: { maxSymmetryDrop: 0.4 } });
+    expect(cfg.reviseRegressionBar).toEqual({
+      maxSymmetryDrop: 0.4,
+      maxOrphanIncrease: 0,
+      maxCoverageDrop: 0.25,
+    });
+  });
+
+  it("rejects an unknown key inside reviseRegressionBar — the staleness argument again", () => {
+    expect(
+      HarnessConfigSchema.safeParse({ reviseRegressionBar: { maxSymetryDrop: 0.15 } }).success,
+    ).toBe(false);
+  });
+
+  it("bounds the two fractional thresholds to 0..1 and keeps the orphan bar a count", () => {
+    // `symmetryScore` is a unit interval and the coverage bar is a *ratio*, so
+    // neither drop can exceed 1 — a bar above it is a units mistake, and a
+    // negative one would reject every revision including an improving pass.
+    expect(
+      HarnessConfigSchema.safeParse({ reviseRegressionBar: { maxSymmetryDrop: 1.5 } }).success,
+    ).toBe(false);
+    expect(
+      HarnessConfigSchema.safeParse({ reviseRegressionBar: { maxCoverageDrop: -0.1 } }).success,
+    ).toBe(false);
+    expect(
+      HarnessConfigSchema.safeParse({ reviseRegressionBar: { maxOrphanIncrease: 1.5 } }).success,
+    ).toBe(false);
+    expect(
+      HarnessConfigSchema.safeParse({ reviseRegressionBar: { maxOrphanIncrease: -1 } }).success,
     ).toBe(false);
   });
 
@@ -2021,13 +2095,34 @@ describe("PipelineStateSchema", () => {
 });
 
 describe("StopReasonSchema", () => {
-  it("holds exactly the four reasons in spec §7.2's table", () => {
+  it("holds exactly the five reasons in spec §7.2's table", () => {
     expect([...STOP_REASONS]).toEqual([
       "no-high-severity",
       "round-cap",
       "empty-diff",
+      "revise-regressed",
       "critic-failed",
     ]);
+  });
+
+  it("carries revise-regressed — a stopped run is not a capped one (A14)", () => {
+    // §11 counts convergence off `stopReason`, and the bench counts how often
+    // the regression guard fired. Folding a discarded revision into `round-cap`
+    // would make a run that stopped *because the reviser was damaging the
+    // sprite* indistinguishable from one that simply used its rounds up.
+    expect(STOP_REASONS).toContain("revise-regressed");
+    expect(StopReasonSchema.parse("revise-regressed")).toBe("revise-regressed");
+    const a: StopReason = "revise-regressed";
+    const b: StopReason = "round-cap";
+    expect(a).not.toBe(b);
+  });
+
+  it("accepts revise-regressed on a persisted history", () => {
+    // The field §8's status bar reads after a reload, and §11's bars read off
+    // the artifact rather than a transient event.
+    expect(
+      SessionHistorySchema.parse(validHistory({ stopReason: "revise-regressed" })).stopReason,
+    ).toBe("revise-regressed");
   });
 
   it.each(STOP_REASONS)("accepts %s", (r) => {

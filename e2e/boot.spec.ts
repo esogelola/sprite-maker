@@ -40,9 +40,9 @@
  * something to show long before `run()` resolves at the gate, and that is what is
  * captured here.
  *
- * It does not depend on the generator being lucky. `qwen3:8b` paints a 16×16
- * canvas in roughly three drafts out of five and returns a fully transparent one
- * otherwise (§6.3 charges that as repairs and tolerates it), so the *capture*
+ * It does not depend on the generator being lucky. A draft can still come back
+ * fully transparent (§6.3 charges that as repairs and tolerates it), so the
+ * *capture*
  * retries — a whole cold boot per attempt — rather than committing whichever
  * artifact the first roll of the dice produced. The assertion is not weakened by
  * this: every attempt producing nothing still fails, and says so.
@@ -83,13 +83,14 @@ const ATTEMPTS = 4;
  * not left to drift: the value is asserted against `getModels()` once the app is
  * up, so a changed default fails loudly instead of silently un-warming the test.
  */
-const GENERATOR = "qwen3:8b";
+const GENERATOR = "qwen3-vl:8b-instruct-q4_K_M";
 
 /**
  * Load the generator into Ollama before the app starts.
  *
  * Fixture setup, not the thing under test. §6.8 scales `callTimeoutMs` by canvas
- * area, so a 16×16 draft gets 30s — and a `qwen3:8b` that Ollama has evicted
+ * area above a floor (§6.8 A12), so a 16×16 draft gets 45s — and a generator
+ * that Ollama has evicted
  * spends all of that budget being loaded back into memory rather than
  * generating, which is how a run ends with `rounds: []` and nothing to capture.
  *
@@ -133,6 +134,7 @@ const API_KEYS = [
   "getConfig",
   "getModels",
   "getPalettes",
+  "getSession",
   "getSessionPath",
   "listModels",
   "onEvent",
@@ -208,11 +210,33 @@ async function bootAndGenerate(attempt: number): Promise<number> {
     expect(prefs.sandbox, "sandbox must be left at Electron's default").toBe(true);
 
     // -- assertion 3: a real generation ------------------------------------
-    const rows = page.getByTestId("rows");
+    /**
+     * The grid, read off the canvas.
+     *
+     * Wave 11 replaced Wave 10's `<pre data-testid="rows">` with a real
+     * canvas, so the sprite is now a grid of cells carrying `data-x`,
+     * `data-y` and `data-ch`. Reassembling the rows from those attributes
+     * keeps this test asserting on the *sprite* rather than on whichever
+     * element happens to render it — the same helper `canvas.spec.ts` uses.
+     */
+    const rowsText = async (): Promise<string> =>
+      (
+        await page.evaluate(() => {
+          const grid = document.querySelector('[data-testid="canvas"]');
+          if (grid === null) return [];
+          const out: string[] = [];
+          for (const cell of Array.from(grid.querySelectorAll("[data-x]"))) {
+            const y = Number(cell.getAttribute("data-y"));
+            out[y] = (out[y] ?? "") + (cell.getAttribute("data-ch") ?? "?");
+          }
+          return out;
+        })
+      ).join("\n");
+
     const status = page.getByTestId("state");
 
     await expect(status).toHaveText(/IDLE/);
-    expect(await rows.textContent()).not.toMatch(GRID);
+    expect(await rowsText()).not.toMatch(GRID);
 
     // The model `warmGenerator` loaded has to be the model the run will call,
     // or the warm-up is a no-op nobody notices. This is what keeps `GENERATOR`
@@ -238,7 +262,7 @@ async function bootAndGenerate(attempt: number): Promise<number> {
      * a document says so instead of timing out with "no sprite yet".
      */
     const progress = async (): Promise<string> => {
-      const text = (await rows.textContent()) ?? "";
+      const text = await rowsText();
       if (GRID.test(text)) return text;
       const reported = [
         ...(await page.getByTestId("error").allTextContents()),
@@ -257,7 +281,7 @@ async function bootAndGenerate(attempt: number): Promise<number> {
       })
       .toMatch(GRID);
 
-    const grid = (await rows.textContent()) ?? "";
+    const grid = await rowsText();
     const painted = grid.replace(/[\n.]/g, "");
     if (painted.length === 0) return 0;
 

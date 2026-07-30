@@ -42,6 +42,32 @@
  * lineage field was inert, and `repairedRows` propagated forward so
  * `row-repaired` re-fired on rounds where the agent had already fixed them.
  *
+ * **6. A revise pass that made the sprite worse is discarded** (amendment A14).
+ * `revise()` is net-negative under every tool configuration ever measured here
+ * — mean Δsymmetry −0.025 shipped, −0.074 with a canvas refresh, −0.157 with
+ * §6.2a's shape ops, coverage rising in all three
+ * (`captures/2026-07-30-revise-tool-measurement.txt`). Since every condition
+ * loses, there is no tooling fix and this file does not attempt one; it makes
+ * the loop **monotonic** instead. `lint()` runs on the document the pass started
+ * from and on the candidate it produced, `reviseRegression` compares the two
+ * against §6.8's `reviseRegressionBar`, and a candidate that is measurably worse
+ * is dropped: the *before* document stays the last round, the run stops with
+ * `revise-regressed`, and there is **no retry** — the measurement says a second
+ * attempt draws from the same distribution.
+ *
+ * Two properties of that are load-bearing and easy to lose:
+ *
+ * - **The comparison is before-vs-after, per round.** The baseline is
+ *   `lintReport` — the lint taken at the top of *this* iteration, of the
+ *   document this pass was handed — never a lint of the candidate, and never one
+ *   computed once outside the loop.
+ * - **A rejected pass is still recorded.** `completeRound` runs first and
+ *   unconditionally, so `Round.revise` carries `turns`, `hitCap` and `summary`
+ *   whichever way the guard decides. A rejected pass is data. `summary` is
+ *   *known-unreliable* prose — the wave-11 round that claimed it "reduced head
+ *   size" added 44 cells of coloured bands — which is a reason to keep storing
+ *   it, not a reason to start trusting it.
+ *
  * Two smaller decisions worth stating, because the artifact reads differently
  * depending on them:
  *
@@ -90,8 +116,10 @@ import {
   type DraftFailure,
   type HarnessConfig,
   type Issue,
+  type LintReport,
   type PipelineEvent,
   type PipelineState,
+  type ReviseRegressionBar,
   type ReviseSummary,
   type SessionHistory,
   type Size,
@@ -277,6 +305,132 @@ function decideStop(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// the revise regression guard — amendment A14, spec §7.2, §6.5
+// ---------------------------------------------------------------------------
+
+/** The metrics half of a `LintReport` — all this guard reads. */
+type LintMetrics = LintReport["metrics"];
+
+/**
+ * Why a revise pass was thrown away.
+ *
+ * Structured rather than a bare boolean or a bare sentence: the metric that
+ * fired is what a bench tuning `reviseRegressionBar` needs, and `reason` is what
+ * a human reading the run needs. Returned rather than thrown — a regression is
+ * a verdict about the sprite, not an error in the harness, and the run that
+ * produced it completes normally at `AWAITING_USER` with the good document.
+ */
+export interface ReviseRegression {
+  metric: "symmetry" | "orphans" | "coverage";
+  before: number;
+  after: number;
+  /** The quantity compared against `limit`: a drop, an increase, or a ratio. */
+  delta: number;
+  limit: number;
+  reason: string;
+}
+
+/**
+ * Did this revise pass make the sprite measurably worse — amendment A14.
+ *
+ * `null` means keep the revision. Anything else means discard it.
+ *
+ * Three checks, in this order, each against a **named, defaulted** threshold so
+ * §13's bench can tune it without editing this file. The order is only about
+ * which reason gets reported when more than one fires; symmetry leads because it
+ * is the signal the measurement identified.
+ *
+ * Every check is deliberately conservative. A guard that fires too eagerly makes
+ * revise useless and a guard that never fires is decoration, so each threshold
+ * was checked against the two wave-11 captures: together they reject the
+ * round 1 → round 2 transition (symmetry 0.913 → 0.493) and leave round 2 →
+ * round 3 alone.
+ *
+ * **The comparisons are `>`, not `>=`.** Each field is a *maximum* — "at most
+ * this much" — so a delta exactly equal to the bar is inside it. That matters
+ * most for `maxOrphanIncrease: 0`, where `>` is what makes the shipped default
+ * mean "no new orphans" rather than "any number of new orphans".
+ *
+ * **Nothing here reads a threshold through a falsy check.** `0` is a legal and
+ * probably-correct value on all three fields — it is the strictest setting on
+ * each — and `bar.maxOrphanIncrease || 1` or `if (bar.maxSymmetryDrop)` would
+ * turn the shipped configuration into a silent no-op. The values are compared
+ * directly, every time.
+ *
+ * Exported so the boundaries are testable directly rather than inferred from a
+ * whole pipeline run, which is also how `syntheticFeedbackIssue` earns its
+ * export.
+ */
+export function reviseRegression(
+  before: LintMetrics,
+  after: LintMetrics,
+  bar: ReviseRegressionBar,
+): ReviseRegression | null {
+  // 1. Symmetry — a DROP, never an absolute floor. An asymmetric sprite is a
+  //    legitimate sprite (every side-facing subject the app can draw scores
+  //    low), so a floor would refuse to revise most of them; what the
+  //    measurement found was the *fall*, 0.913 → 0.493 in one pass.
+  const symmetryDrop = before.symmetryScore - after.symmetryScore;
+  if (symmetryDrop > bar.maxSymmetryDrop) {
+    return {
+      metric: "symmetry",
+      before: before.symmetryScore,
+      after: after.symmetryScore,
+      delta: symmetryDrop,
+      limit: bar.maxSymmetryDrop,
+      reason:
+        `symmetry fell ${symmetryDrop.toFixed(3)} (${before.symmetryScore.toFixed(3)} → ` +
+        `${after.symmetryScore.toFixed(3)}), past maxSymmetryDrop ${bar.maxSymmetryDrop}`,
+    };
+  }
+
+  // 2. Orphans — cells the pass detached from the sprite. `maxOrphanIncrease: 0`
+  //    is the default and means "no new orphans"; an orphan the pass *inherited*
+  //    is not charged to it, and removing one is free.
+  const orphanIncrease = after.orphanCount - before.orphanCount;
+  if (orphanIncrease > bar.maxOrphanIncrease) {
+    return {
+      metric: "orphans",
+      before: before.orphanCount,
+      after: after.orphanCount,
+      delta: orphanIncrease,
+      limit: bar.maxOrphanIncrease,
+      reason:
+        `${orphanIncrease} new orphan ${orphanIncrease === 1 ? "pixel" : "pixels"} ` +
+        `(${before.orphanCount} → ${after.orphanCount}), past maxOrphanIncrease ` +
+        `${bar.maxOrphanIncrease}`,
+    };
+  }
+
+  // 3. Coverage — **relative** to what was there, `(before - after) / before`.
+  //    Absolute would be meaningless: a 16×16 sprite covers 0.10-0.30 of its
+  //    canvas, so losing three quarters of one is an absolute drop of 0.135 and
+  //    no absolute bar could separate that from ordinary work. Only *collapse*
+  //    is policed — coverage growth is what the reviser actually does, and
+  //    charging it would fire on every pass.
+  //
+  //    A blank before-canvas is spelled out rather than left to `0/0 = NaN`,
+  //    which compares `false` and would pass by accident.
+  const coverageDrop =
+    before.coverage === 0 ? 0 : (before.coverage - after.coverage) / before.coverage;
+  if (coverageDrop > bar.maxCoverageDrop) {
+    return {
+      metric: "coverage",
+      before: before.coverage,
+      after: after.coverage,
+      delta: coverageDrop,
+      limit: bar.maxCoverageDrop,
+      reason:
+        `coverage collapsed by ${(coverageDrop * 100).toFixed(1)}% relative ` +
+        `(${before.coverage.toFixed(4)} → ${after.coverage.toFixed(4)}), past ` +
+        `maxCoverageDrop ${bar.maxCoverageDrop}`,
+    };
+  }
+
+  return null;
+}
+
 /**
  * A revised document — spec §7.5, rule 5 of this file's header.
  *
@@ -458,9 +612,33 @@ async function runLoop(ctx: Ctx, entry: LoopEntry): Promise<SessionHistory> {
 
     // Rule 2: computed here, from the two documents, never read from the stored
     // `diffFromPrev`.
+    //
+    // Ahead of the guard, because a pass that changed nothing cannot have made
+    // anything worse — its metrics are identical by construction — and
+    // `empty-diff` is the honest reason for it. §7.1 draws both on this one
+    // transition.
     if (diff(doc.rows, grid).length === 0) return await finish(ctx, "empty-diff", round);
 
-    doc = deriveDoc(doc, grid, ctx.history.rounds.length + 1, ctx.config);
+    // Rule 6. The candidate is assembled before it is judged, and becomes `doc`
+    // only if it survives — so a rejected revision is never appended, never
+    // persisted, and never reaches the filmstrip. `lintReport` is the baseline:
+    // the lint taken at the top of THIS iteration, of the document this pass was
+    // handed. Comparing the candidate against itself is the mutation that makes
+    // the guard silently unfireable.
+    const candidate = deriveDoc(doc, grid, ctx.history.rounds.length + 1, ctx.config);
+    const regressed = reviseRegression(
+      lintReport.metrics,
+      lint(candidate).metrics,
+      ctx.config.reviseRegressionBar,
+    );
+    if (regressed !== null) {
+      // No retry: `captures/2026-07-30-revise-tool-measurement.txt` measured
+      // every configuration as net-negative, so a second pass draws from the
+      // same distribution. The last round still holds the good document.
+      return await finish(ctx, "revise-regressed", round);
+    }
+
+    doc = candidate;
     userFeedback = null;
     draftMs = null;
   }
@@ -612,6 +790,25 @@ export async function applyFeedback(
   }
 
   const doc = deriveDoc(source.doc, grid, ctx.history.rounds.length + 1, config);
+
+  // And the same guard, for the same reason §7.3 gives for everything else here:
+  // agent feedback and user feedback travel one code path, so there is a single
+  // loop to build, test and debug. The pass the user asked for runs through the
+  // *same* `revise()` that the measurement found net-negative, and a user asking
+  // for a tail did not ask for the silhouette to be redrawn.
+  //
+  // `lint(source.doc)` is recomputed rather than read from `source.lint`: the
+  // stored report is of that document by contract, but this is a pure
+  // microsecond call over a document that may have been reloaded from disk or
+  // hand-edited, and a guard that trusts a stale baseline is worse than no
+  // guard. The cost of being sure is nil.
+  const regressed = reviseRegression(
+    lint(source.doc).metrics,
+    lint(doc).metrics,
+    config.reviseRegressionBar,
+  );
+  if (regressed !== null) return await finish(ctx, "revise-regressed", round);
+
   return runLoop(ctx, { doc, userFeedback: feedback, draftMs: null });
 }
 

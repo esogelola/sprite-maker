@@ -576,9 +576,25 @@ Every transition emits a typed event. **`REVISING` emits per-turn progress** —
 | `no-high-severity` | Zero high-severity issues after filtering — the intended success path |
 | `round-cap` | `round >= maxRounds` |
 | `empty-diff` | The revise stage ran and changed nothing. Catches a critic reporting an issue the agent cannot fix, which would otherwise burn every round |
+| `revise-regressed` | The revision made the sprite measurably worse and was discarded — amendment A14 |
 | `critic-failed` | Two consecutive unparseable critiques. **Distinct from `no-high-severity`** — without it a broken critic reports success and the user is told the sprite passed a critique that never ran |
 
 An **empty filtered issue list skips `REVISING` unconditionally**, including when `stopOnNoHighSeverity` is false. There is nothing for the agent to do and no prompt that would make sense.
+
+**Amendment A14 — the revise stage is guarded, because it is net-negative.** Measured across 5 seeds on the real failing sprite with its real critique (`captures/2026-07-30-revise-tool-measurement.txt`): mean Δsymmetry was **negative in every configuration tested**. Giving the agent shape operations made it six times worse (−0.157, degraded 5/5) and showing it the canvas between turns also made it worse (−0.074). The shipped blind `place_pixel` loop (−0.025) is the best of the three, and still negative.
+
+That is not a tooling problem and has no tooling fix. Drafting is composition from nothing, where expressiveness helps and there is no prior work to damage; revision corrects something that already works, where the same expressiveness overwrites the parts that were right. A10 does not transfer.
+
+So the harness guards the output instead. After each revise pass, `lint()` runs on the before and after documents, and the revision is **discarded** if the sprite got measurably worse against `reviseRegressionBar` (`maxSymmetryDrop: 0.15`, `maxOrphanIncrease: 0`, `maxCoverageDrop: 0.25` relative). The *before* document is kept, `stopReason` becomes `revise-regressed`, and the loop stops without retrying — a retry draws from the same distribution.
+
+`empty-diff` is evaluated first: an unchanged grid cannot have regressed. `Round.revise` is still recorded on a rejected pass, because a rejected pass is data.
+
+**This makes the loop monotonic. It does not make revise useful.** Live, the guard fired in 2 of 3 seeded runs. On one it was unambiguously right — replayed with the bar open, the same run went 3/5 → 2/5 → 1/5 with coverage halving and symmetry falling 0.939 → 0.280. On another it blocked a round the critic scored *higher* (3/5 against the kept round's 1/5) but which was structurally worse (symmetry 0.465, one orphan, the subject's whole left side missing). The bar is structural and tracks the critic's rating not at all — which, given §6.4's `overall` is anti-correlated with every deterministic metric, is the intended behaviour rather than a defect.
+
+Two consequences worth stating plainly:
+
+- **§6.5's `orphan-pixel` does not catch what this needs.** It counts a cell whose four orthogonal neighbours are transparent, so two adjacent detached cells rescue each other — the floating bar in Wave 11's round 3 scores `orphanCount: 0`. It detects detached *pixels*, not detached *components*. The check is harmless and stays, but symmetry and coverage do the work.
+- **§6.7's "any round may be accepted" is narrowed.** A rejected round never enters the history, so the user cannot choose it. Monotonicity is bought with that option.
 
 ### 7.3 User feedback
 

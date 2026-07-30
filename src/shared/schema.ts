@@ -482,6 +482,51 @@ export const HarnessConfigSchema = z.strictObject({
     })
     .default({ minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 }),
   /**
+   * When a revise pass has to be thrown away — spec §7.2, amendment A14.
+   *
+   * The revise stage is **net-negative under every tool configuration measured**
+   * (`captures/2026-07-30-revise-tool-measurement.txt`): mean Δsymmetry −0.025
+   * for the shipped blind `place_pixel` loop, −0.074 with a canvas refresh
+   * between turns, −0.157 with the §6.2a shape ops. Coverage rose in every
+   * condition while symmetry fell — the reviser adds pixels and breaks the
+   * silhouette — so there is no tooling fix and this bar does not attempt one.
+   * It makes the loop **monotonic**: `lint()` runs on the document before the
+   * pass and on the candidate after it, and a candidate that is measurably worse
+   * is discarded rather than returned.
+   *
+   * Three thresholds, each traceable to a measured failure mode, and each named
+   * and defaulted so §13's bench can tune it rather than editing code:
+   *
+   * - **`maxSymmetryDrop`** — the clearest signal. The session the user watched
+   *   went 0.913 → 0.493 between rounds 1 and 2. A *drop*, never an absolute
+   *   floor: an asymmetric sprite is a legitimate sprite, and a floor would
+   *   refuse every side-facing subject the app can draw.
+   * - **`maxOrphanIncrease`** — cells detached from the sprite. **`0` is the
+   *   default and it means "no new orphans at all", not "check disabled".**
+   *   Every falsy read of this field (`bar.maxOrphanIncrease || …`,
+   *   `if (bar.maxOrphanIncrease)`) turns the shipped default into a no-op, and
+   *   the check is compared with `>` against the value itself for that reason.
+   * - **`maxCoverageDrop`** — **relative** to the coverage before the pass,
+   *   `(before − after) / before`, not an absolute difference. Coverage on a
+   *   16×16 runs 0.10–0.30, so an absolute bar of 0.25 could never fire at all:
+   *   losing three quarters of a 0.18 sprite is an absolute drop of 0.135.
+   *   Distinct from coverage *growth*, which is what the reviser actually does
+   *   and which this bar deliberately does not police.
+   *
+   * A bar that fires too eagerly makes revise useless; one that never fires is
+   * decoration. These figures are checked against the two captures: they reject
+   * the round 1 → round 2 transition and leave round 2 → round 3 alone.
+   */
+  reviseRegressionBar: z
+    .strictObject({
+      maxSymmetryDrop: Unit.default(0.15),
+      /** A count, not a fraction. `0` is legal, load-bearing, and the default. */
+      maxOrphanIncrease: z.int().nonnegative().default(0),
+      /** **Relative**: `(before − after) / before`. */
+      maxCoverageDrop: Unit.default(0.25),
+    })
+    .default({ maxSymmetryDrop: 0.15, maxOrphanIncrease: 0, maxCoverageDrop: 0.25 }),
+  /**
    * The sampling seed every stage sends — spec §6.8, amendment A13.
    *
    * **`null` is the shipped default and must stay that way.** A fixed default
@@ -541,11 +586,20 @@ export const PipelineStateSchema = z.enum(PIPELINE_STATES);
  * `critic-failed` is deliberately distinct from `no-high-severity`: without it
  * a broken critic reports success and the user is told the sprite passed a
  * critique that never ran.
+ *
+ * `revise-regressed` sits next to `empty-diff` because the two are the same
+ * kind of verdict — both are decided on the revise transition, from the two
+ * documents, and neither is a property of the issue list. It is distinct from
+ * `round-cap` for the reason `critic-failed` is distinct from
+ * `no-high-severity`: a run that stopped because the reviser was making the
+ * sprite worse did not run out of rounds, and §11 and the bench have to be able
+ * to count the two apart.
  */
 export const STOP_REASONS = [
   "no-high-severity",
   "round-cap",
   "empty-diff",
+  "revise-regressed",
   "critic-failed",
 ] as const;
 
@@ -816,6 +870,7 @@ export type Intent = z.infer<typeof IntentSchema>;
 export type DrawOp = z.infer<typeof DrawOpSchema>;
 export type DrawOpName = (typeof DRAW_OP_NAMES)[number];
 export type DraftGaugeBar = HarnessConfig["draftGaugeBar"];
+export type ReviseRegressionBar = HarnessConfig["reviseRegressionBar"];
 export type PaletteRef = z.infer<typeof PaletteRefSchema>;
 export type SpriteDoc = z.infer<typeof SpriteDocSchema>;
 export type Issue = z.infer<typeof IssueSchema>;
@@ -851,6 +906,9 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   callTimeoutFloorMs: 45000,
   maxDraftBatches: 5,
   draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
+  // A14. `maxOrphanIncrease: 0` is "no new orphans", not "check disabled" — see
+  // the field. `maxCoverageDrop` is relative to the coverage before the pass.
+  reviseRegressionBar: { maxSymmetryDrop: 0.15, maxOrphanIncrease: 0, maxCoverageDrop: 0.25 },
   // A13. `null`, deliberately — see the field. The bench sets a seed; the app
   // ships without one, because a default seed makes every user's first fox the
   // same fox.

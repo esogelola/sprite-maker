@@ -36,17 +36,21 @@ import { OllamaTimeoutError, OllamaUnreachableError } from "@main/ollama";
 import {
   accept,
   applyFeedback,
+  reviseRegression,
   run,
   syntheticFeedbackIssue,
   type PipelineDeps,
 } from "@main/pipeline";
 import {
+  DEFAULT_HARNESS_CONFIG,
   HarnessConfigSchema,
   PipelineEventSchema,
   SessionHistorySchema,
   type ChatTurn,
   type HarnessConfig,
+  type LintReport,
   type PipelineEvent,
+  type ReviseRegressionBar,
   type SessionHistory,
   type Size,
 } from "@shared/schema";
@@ -129,6 +133,111 @@ const NOOP_TURN: ChatTurn = {
 
 /** A turn that narrates instead of editing — burns the cap, changes nothing. */
 const NARRATING_TURN: ChatTurn = { content: "I will fix the outline.", toolCalls: [] };
+
+// -- A14 fixtures: the session the user watched -------------------------------
+
+/**
+ * A revise turn that rewrites `from` into `to` cell by cell, then finishes.
+ *
+ * One `place_pixel` per differing cell — the tool vocabulary the reviser
+ * actually ships with, per `captures/2026-07-30-revise-tool-measurement.txt`,
+ * which measured the alternatives as *worse*. `index` is passed as the row
+ * character, which `coerceIndex` accepts and which makes `.` (clearing a cell)
+ * expressible, so the helper is general rather than additive-only.
+ */
+function rewriteTurn(from: string[], to: string[], summary: string): ChatTurn {
+  const toolCalls: ChatTurn["toolCalls"] = [];
+  for (let y = 0; y < to.length; y++) {
+    for (let x = 0; x < to[y].length; x++) {
+      if (from[y][x] === to[y][x]) continue;
+      toolCalls.push({
+        id: `p-${x}-${y}`,
+        name: "place_pixel",
+        arguments: { x, y, index: to[y][x] },
+      });
+    }
+  }
+  toolCalls.push({ id: "done", name: "done", arguments: { summary } });
+  return { content: "", toolCalls };
+}
+
+/**
+ * Round 1 of the "a dog standing" session — the sprite the user watched being
+ * wrecked. Verbatim from `captures/2026-07-30-wave-11-rounds.txt`:
+ * coverage 0.180, symmetry 0.913, 4 palette entries, 0 orphans.
+ */
+const WAVE11_ROUND_1 = [
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  ".....a.aa.a.....",
+  ".....aaaaaa.....",
+  "....aaaaaaaa....",
+  ".....aeeeee.....",
+  ".....aeeeee.....",
+  "......2222......",
+  "......2222......",
+  "......2cc2......",
+  "......c22c......",
+  "................",
+];
+
+/**
+ * Round 2 of the same session — what the reviser handed back. Coverage 0.285,
+ * symmetry **0.493**, 8 palette entries, 44 cells changed, and a summary
+ * claiming it "reduced head size" while adding coloured bands across the right
+ * half of the canvas.
+ */
+const WAVE11_ROUND_2 = [
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  "................",
+  ".....a12a.a.....",
+  ".....aaaaaa.....",
+  "....a222222222..",
+  ".....a333333333.",
+  ".....ae444444444",
+  "......222222222.",
+  "......22222222..",
+  "......2cc2ccc...",
+  "......c22c.ddd..",
+  "................",
+];
+
+/** The summary round 1's revise pass actually reported, verbatim. */
+const WAVE11_SUMMARY =
+  "Replaced the cupcake-like region with a dog shape using appropriate palette colors.";
+
+/** 16×16 pico-8, because the wave-11 grids reference indices up to `e`. */
+const DOG_INPUT = { prompt: "a dog standing", size: SIZE, paletteId: "pico-8" };
+
+/** A symmetric 8×4 slab: rows 6–9, columns 4–11. 32 cells, symmetry 1. */
+const SLAB_ROWS = Array.from({ length: 16 }, (_, y) =>
+  Array.from({ length: 16 }, (_, x) => (y >= 6 && y <= 9 && x >= 4 && x <= 11 ? "1" : ".")).join(""),
+);
+
+/** `SLAB_ROWS` with row `y` cleared, for the coverage-drop fixtures. */
+function slabWithout(...cleared: number[]): string[] {
+  return SLAB_ROWS.map((row, y) => (cleared.includes(y) ? ".".repeat(16) : row));
+}
+
+/** A 4×4 block at x 2–5, y 6–9. Its mirror (x 10–13) is empty, so symmetry is 0. */
+const LOPSIDED_ROWS = Array.from({ length: 16 }, (_, y) =>
+  Array.from({ length: 16 }, (_, x) => (y >= 6 && y <= 9 && x >= 2 && x <= 5 ? "1" : ".")).join(""),
+);
+
+/** The same block with its mirror drawn in — symmetry 1, coverage doubled. */
+const MIRRORED_ROWS = Array.from({ length: 16 }, (_, y) =>
+  Array.from({ length: 16 }, (_, x) =>
+    y >= 6 && y <= 9 && ((x >= 2 && x <= 5) || (x >= 10 && x <= 13)) ? "1" : ".",
+  ).join(""),
+);
 
 interface Harness {
   deps: PipelineDeps;
@@ -669,6 +778,570 @@ describe("run — empty-diff", () => {
     expect(history.rounds[1].diffFromPrev).toHaveLength(16);
     expect(history.rounds[1].diffFromPrev?.[0]).toEqual({ x: 0, y: 0, from: ".", to: "1" });
     expect(history.rounds[1].doc.meta.parentId).toBe(history.rounds[0].doc.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the revise regression guard — amendment A14, spec §7.2
+//
+// Built on `captures/2026-07-30-revise-tool-measurement.txt`, which measured the
+// revise stage as net-negative under EVERY tool configuration tried: mean
+// Δsymmetry −0.025 shipped, −0.074 with a canvas refresh, −0.157 with shape ops.
+// There is no tooling fix, so this wave makes the loop SAFE rather than useful:
+// `lint()` before and after the pass, and a candidate that is measurably worse
+// is discarded.
+// ---------------------------------------------------------------------------
+
+/** The shipped bar, with named overrides. */
+function bar(over: Partial<ReviseRegressionBar> = {}): ReviseRegressionBar {
+  return { ...DEFAULT_HARNESS_CONFIG.reviseRegressionBar, ...over };
+}
+
+/** Lint metrics with everything at a benign value except what a test names. */
+function metrics(over: Partial<LintReport["metrics"]> = {}): LintReport["metrics"] {
+  return { coverage: 0.5, paletteUsed: 4, orphanCount: 0, symmetryScore: 1, ...over };
+}
+
+describe("reviseRegression — the bar itself", () => {
+  it("passes an identical pair", () => {
+    expect(reviseRegression(metrics(), metrics(), bar())).toBeNull();
+  });
+
+  it("passes a strictly better pair — the guard must not block progress", () => {
+    const before = metrics({ symmetryScore: 0.4, coverage: 0.1, orphanCount: 3 });
+    const after = metrics({ symmetryScore: 0.9, coverage: 0.2, orphanCount: 0 });
+
+    expect(reviseRegression(before, after, bar())).toBeNull();
+  });
+
+  // -- symmetry ------------------------------------------------------------
+
+  it("names symmetry on the real round-1 → round-2 numbers", () => {
+    const found = reviseRegression(
+      metrics({ symmetryScore: 0.9130434782608695, coverage: 0.1796875 }),
+      metrics({ symmetryScore: 0.4931506849315068, coverage: 0.28515625 }),
+      bar(),
+    );
+
+    expect(found?.metric).toBe("symmetry");
+  });
+
+  it("leaves the capture's round-2 → round-3 transition alone — the bar is conservative", () => {
+    // The other end of the calibration, from the same capture: symmetry
+    // 0.493 → 0.441, coverage 0.285 → 0.230, orphans 0 → 0. A drop of 0.052 and
+    // a relative coverage loss of 0.192 are both inside the bar, and they
+    // should be — a guard that also refused this one would be refusing ordinary
+    // work, and "reject everything" is not a monotonic loop, it is a disabled
+    // stage.
+    //
+    // Note what this does NOT catch, because it is a real limit rather than an
+    // oversight: round 3 is the frame with the floating yellow bar, and
+    // `orphanCount` is **0** on it. §6.5 defines an orphan as a cell whose four
+    // orthogonal neighbours are all transparent, so two stacked detached cells
+    // rescue each other and a detached *bar* is invisible to the metric. The
+    // orphan check catches detached pixels, not detached components.
+    const found = reviseRegression(
+      metrics({ symmetryScore: 0.4931506849315068, coverage: 0.28515625, orphanCount: 0 }),
+      metrics({ symmetryScore: 0.4406779661016949, coverage: 0.23046875, orphanCount: 0 }),
+      bar(),
+    );
+
+    expect(found).toBeNull();
+  });
+
+  it("accepts a symmetry drop exactly EQUAL to the bar", () => {
+    // `maxSymmetryDrop` reads as "at most this much", so the comparison is `>`
+    // and the boundary value is inside the bar. Dyadic figures, so the
+    // subtraction is exact and the assertion is about the comparison rather
+    // than about binary floating point: 0.75 − 0.5 is 0.25 to the last bit,
+    // where 1 − 0.85 is 0.15000000000000002 and would decide the opposite way
+    // for reasons that have nothing to do with sprites.
+    const found = reviseRegression(
+      metrics({ symmetryScore: 0.75 }),
+      metrics({ symmetryScore: 0.5 }),
+      bar({ maxSymmetryDrop: 0.25 }),
+    );
+
+    expect(found).toBeNull();
+  });
+
+  it("rejects a symmetry drop one step past the bar", () => {
+    const found = reviseRegression(
+      metrics({ symmetryScore: 0.75 }),
+      metrics({ symmetryScore: 0.5 }),
+      bar({ maxSymmetryDrop: 0.125 }),
+    );
+
+    expect(found?.metric).toBe("symmetry");
+    expect(found?.before).toBe(0.75);
+    expect(found?.after).toBe(0.5);
+    expect(found?.delta).toBe(0.25);
+    expect(found?.limit).toBe(0.125);
+  });
+
+  it("reads maxSymmetryDrop: 0 as 'no drop at all', not as absent", () => {
+    // The falsy-zero probe on this threshold. `0` is the strictest legal
+    // setting and every `bar.maxSymmetryDrop || 0.15` reads it as unset.
+    expect(
+      reviseRegression(
+        metrics({ symmetryScore: 0.5 }),
+        metrics({ symmetryScore: 0.5 }),
+        bar({ maxSymmetryDrop: 0 }),
+      ),
+    ).toBeNull();
+    expect(
+      reviseRegression(
+        metrics({ symmetryScore: 0.5 }),
+        metrics({ symmetryScore: 0.25 }),
+        bar({ maxSymmetryDrop: 0 }),
+      )?.metric,
+    ).toBe("symmetry");
+  });
+
+  it("tests a DROP, never an absolute floor — an asymmetric sprite is legitimate", () => {
+    // A side-facing dog scores near zero and is exactly what the app is for.
+    // A floor would refuse every revision of every such sprite.
+    expect(
+      reviseRegression(metrics({ symmetryScore: 0.1 }), metrics({ symmetryScore: 0.1 }), bar()),
+    ).toBeNull();
+    expect(
+      reviseRegression(metrics({ symmetryScore: 0 }), metrics({ symmetryScore: 0 }), bar()),
+    ).toBeNull();
+  });
+
+  // -- orphans -------------------------------------------------------------
+
+  it("reads maxOrphanIncrease: 0 as 'no new orphans', not as 'check disabled'", () => {
+    // The single most likely defect in A14, and the fifth near-miss of its kind
+    // in this project. `0` is the shipped default and it is a real bound.
+    expect(
+      reviseRegression(
+        metrics({ orphanCount: 0 }),
+        metrics({ orphanCount: 1 }),
+        bar({ maxOrphanIncrease: 0 }),
+      )?.metric,
+    ).toBe("orphans");
+    // And through the default rather than an explicit override, because those
+    // are two different reads of the same field.
+    expect(
+      reviseRegression(metrics({ orphanCount: 0 }), metrics({ orphanCount: 1 }), bar())?.metric,
+    ).toBe("orphans");
+  });
+
+  it("allows orphans that were already there, and rewards removing them", () => {
+    expect(
+      reviseRegression(metrics({ orphanCount: 4 }), metrics({ orphanCount: 4 }), bar()),
+    ).toBeNull();
+    expect(
+      reviseRegression(metrics({ orphanCount: 4 }), metrics({ orphanCount: 1 }), bar()),
+    ).toBeNull();
+  });
+
+  it("honours a raised orphan bar — it is a threshold, not a constant", () => {
+    expect(
+      reviseRegression(
+        metrics({ orphanCount: 0 }),
+        metrics({ orphanCount: 2 }),
+        bar({ maxOrphanIncrease: 2 }),
+      ),
+    ).toBeNull();
+    expect(
+      reviseRegression(
+        metrics({ orphanCount: 0 }),
+        metrics({ orphanCount: 3 }),
+        bar({ maxOrphanIncrease: 2 }),
+      )?.metric,
+    ).toBe("orphans");
+  });
+
+  // -- coverage ------------------------------------------------------------
+
+  it("compares coverage RELATIVELY, not absolutely", () => {
+    // 0.12 → 0.06 loses half the sprite. The absolute difference is 0.06, well
+    // inside a 0.25 bar, so an absolute comparison could not fire here — and on
+    // a 16×16, where coverage runs 0.10–0.30, it could barely fire at all.
+    const found = reviseRegression(
+      metrics({ coverage: 0.12 }),
+      metrics({ coverage: 0.06 }),
+      bar({ maxCoverageDrop: 0.25 }),
+    );
+
+    expect(found?.metric).toBe("coverage");
+    expect(found?.delta).toBeCloseTo(0.5, 12);
+    // The absolute difference, which the mutant would have compared.
+    expect(0.12 - 0.06).toBeLessThan(0.25);
+  });
+
+  it("accepts a relative coverage drop exactly EQUAL to the bar", () => {
+    const found = reviseRegression(
+      metrics({ coverage: 0.5 }),
+      metrics({ coverage: 0.375 }),
+      bar({ maxCoverageDrop: 0.25 }),
+    );
+
+    expect(found).toBeNull();
+  });
+
+  it("does not police coverage GROWTH — that is what the reviser actually does", () => {
+    // Every measured condition raised coverage while dropping symmetry. Making
+    // growth a regression would fire on every pass and make revise useless.
+    expect(
+      reviseRegression(metrics({ coverage: 0.18 }), metrics({ coverage: 0.285 }), bar()),
+    ).toBeNull();
+  });
+
+  it("reads maxCoverageDrop: 0 as 'no loss at all', not as absent", () => {
+    expect(
+      reviseRegression(
+        metrics({ coverage: 0.5 }),
+        metrics({ coverage: 0.5 }),
+        bar({ maxCoverageDrop: 0 }),
+      ),
+    ).toBeNull();
+    expect(
+      reviseRegression(
+        metrics({ coverage: 0.5 }),
+        metrics({ coverage: 0.49 }),
+        bar({ maxCoverageDrop: 0 }),
+      )?.metric,
+    ).toBe("coverage");
+  });
+
+  it("survives a blank before-canvas rather than dividing by zero", () => {
+    // `coverage: 0` is reachable — §6.5 scores an empty canvas symmetry 1, so a
+    // model returning 16 rows of dots lands here. `(0 − 0) / 0` is `NaN`, and
+    // `NaN > limit` is `false`, so the check would silently pass; it is spelled
+    // out rather than left to that accident.
+    expect(reviseRegression(metrics({ coverage: 0 }), metrics({ coverage: 0 }), bar())).toBeNull();
+    expect(
+      reviseRegression(metrics({ coverage: 0 }), metrics({ coverage: 0.2 }), bar()),
+    ).toBeNull();
+  });
+
+  it("reports symmetry first when more than one threshold is breached", () => {
+    // Not arbitrary: §6.5's symmetry is the signal the measurement identified,
+    // and a stable order keeps the reason string deterministic.
+    const found = reviseRegression(
+      metrics({ symmetryScore: 1, coverage: 0.5, orphanCount: 0 }),
+      metrics({ symmetryScore: 0, coverage: 0.1, orphanCount: 9 }),
+      bar(),
+    );
+
+    expect(found?.metric).toBe("symmetry");
+  });
+});
+
+describe("run — the revise regression guard", () => {
+  /** The wave-11 script: draft round 1, critique it, revise it into round 2. */
+  function wave11() {
+    return harness({
+      generate: [draftReply(WAVE11_ROUND_1)],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(WAVE11_ROUND_1, WAVE11_ROUND_2, WAVE11_SUMMARY)],
+    });
+  }
+
+  it("REJECTS the real round-1 → round-2 transition the user watched", async () => {
+    // The headline. `captures/2026-07-30-wave-11-rounds.txt` recorded symmetry
+    // 0.913 → 0.493 across this exact pair of grids. A guard that would not have
+    // saved this sprite has failed, whatever else it does.
+    const { deps } = wave11();
+
+    const history = await run(deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+
+    // The capture's own numbers, recomputed by `lint()` from the stored doc —
+    // so the fixture is pinned to the session rather than to my arithmetic.
+    expect(history.rounds[0].lint.metrics.symmetryScore).toBeCloseTo(0.913, 3);
+    expect(history.rounds[0].lint.metrics.coverage).toBeCloseTo(0.18, 3);
+    expect(history.rounds[0].lint.metrics.orphanCount).toBe(0);
+
+    expect(history.stopReason).toBe("revise-regressed");
+  });
+
+  it("keeps the BEFORE document — round 2 never enters the history", async () => {
+    const { deps } = wave11();
+
+    const history = await run(deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+
+    expect(history.rounds).toHaveLength(1);
+    expect(history.rounds[0].doc.rows).toEqual(WAVE11_ROUND_1);
+    // Not merely "the last round is the good one" — the wrecked grid must not
+    // be anywhere, because §8's filmstrip renders every round.
+    for (const round of history.rounds) {
+      expect(round.doc.rows).not.toEqual(WAVE11_ROUND_2);
+    }
+  });
+
+  it("still records Round.revise on the rejected pass — turns, hitCap, summary", async () => {
+    const { deps } = wave11();
+
+    const history = await run(deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+
+    // A rejected pass is data. `summary` is known-unreliable prose — this very
+    // round claimed it "replaced the cupcake-like region with a dog shape"
+    // while dropping symmetry by 0.42 — which is a reason to keep recording it,
+    // not a reason to start trusting it.
+    expect(history.rounds[0].revise).not.toBeNull();
+    expect(history.rounds[0].revise?.turns).toBe(1);
+    expect(history.rounds[0].revise?.hitCap).toBe(false);
+    expect(history.rounds[0].revise?.summary).toBe(WAVE11_SUMMARY);
+    expect(history.rounds[0].timings.reviseMs).not.toBeNull();
+  });
+
+  it("stops the loop and does NOT retry — a retry draws from the same distribution", async () => {
+    const { deps, stub, events } = wave11();
+
+    const history = await run(deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+
+    expect(countCalls(stub, "chatWithTools")).toBe(1);
+    expect(countCalls(stub, "vision")).toBe(1);
+    expect(stateTrace(events)).not.toContain("LINTING:2");
+    expect(history.outcome).toBe("completed");
+    expect(history.finalState).toBe("AWAITING_USER");
+    expect(history.error).toBeNull();
+  });
+
+  it("persists the rejection, so a reload reads the same verdict", async () => {
+    const { deps, saved } = wave11();
+
+    await run(deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+
+    const last = saved[saved.length - 1];
+    expect(last.stopReason).toBe("revise-regressed");
+    expect(last.outcome).toBe("completed");
+    for (const written of saved) {
+      for (const round of written.rounds) {
+        expect(round.doc.rows).not.toEqual(WAVE11_ROUND_2);
+      }
+    }
+  });
+
+  it("accepts the SAME pass when the bar is widened — the fixture really is round 2", async () => {
+    // The other half of the headline, and the "guard always fires" mutant's
+    // death: with the symmetry bar opened all the way, this identical script
+    // runs to the round cap and stores the wave-11 round-2 grid verbatim. So
+    // the rejection above is the guard's decision, not a broken fixture.
+    const { deps } = wave11();
+
+    const history = await run(
+      deps,
+      DOG_INPUT,
+      cfg({ maxRounds: 2, reviseRegressionBar: bar({ maxSymmetryDrop: 1 }) }),
+    );
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[1].doc.rows).toEqual(WAVE11_ROUND_2);
+    expect(history.rounds[1].lint.metrics.symmetryScore).toBeCloseTo(0.493, 3);
+    expect(history.rounds[0].diffFromPrev).toBeNull();
+    expect(history.rounds[1].diffFromPrev).toHaveLength(44); // the capture's own figure
+    expect(history.stopReason).toBe("round-cap");
+  });
+
+  // -- the guard must not block progress -----------------------------------
+
+  it("accepts a revision that IMPROVES symmetry", async () => {
+    const { deps } = harness({
+      generate: [draftReply(LOPSIDED_ROWS)],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(LOPSIDED_ROWS, MIRRORED_ROWS, "mirrored the body")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 2 }));
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[0].lint.metrics.symmetryScore).toBe(0);
+    expect(history.rounds[1].lint.metrics.symmetryScore).toBe(1);
+    expect(history.stopReason).toBe("round-cap");
+    expect(history.stopReason).not.toBe("revise-regressed");
+  });
+
+  it("accepts a revision that leaves every guarded metric UNCHANGED", async () => {
+    // A recolour of a mirrored pair: coverage, orphans and symmetry are all
+    // identical afterwards, and only `paletteUsed` — which the bar does not
+    // police — moved. A guard that fires here fires on everything.
+    const recoloured = DRAFT_ROWS.map((row, y) =>
+      y === 6 ? `${row.slice(0, 6)}2${row.slice(7, 9)}2${row.slice(10)}` : row,
+    );
+    const { deps } = harness({
+      generate: [draftReply()],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(DRAFT_ROWS, recoloured, "recoloured the top corners")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 2 }));
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[1].doc.rows).toEqual(recoloured);
+    expect(history.rounds[0].lint.metrics).toMatchObject({
+      symmetryScore: 1,
+      orphanCount: 0,
+      coverage: 0.0625,
+    });
+    expect(history.rounds[1].lint.metrics).toMatchObject({
+      symmetryScore: 1,
+      orphanCount: 0,
+      coverage: 0.0625,
+    });
+    expect(history.stopReason).toBe("round-cap");
+  });
+
+  // -- the other two thresholds, end to end --------------------------------
+
+  it("rejects a pass that adds orphans, with maxOrphanIncrease at its default 0", async () => {
+    // Two mirrored corner pixels: symmetry stays 1 and coverage rises, so the
+    // orphan check is the only one that can fire. Wave 11's round 3 left a
+    // floating bar attached to nothing; this is the decidable version of it.
+    const orphaned = DRAFT_ROWS.map((row, y) => (y === 0 ? `1${row.slice(1, 15)}1` : row));
+    const { deps } = harness({
+      generate: [draftReply()],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(DRAFT_ROWS, orphaned, "added highlights")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 3 }));
+
+    expect(history.stopReason).toBe("revise-regressed");
+    expect(history.rounds).toHaveLength(1);
+    expect(history.rounds[0].doc.rows).toEqual(DRAFT_ROWS);
+  });
+
+  it("accepts the same orphan pass when the bar is raised to 2", async () => {
+    const orphaned = DRAFT_ROWS.map((row, y) => (y === 0 ? `1${row.slice(1, 15)}1` : row));
+    const { deps } = harness({
+      generate: [draftReply()],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(DRAFT_ROWS, orphaned, "added highlights")],
+    });
+
+    const history = await run(
+      deps,
+      INPUT,
+      cfg({ maxRounds: 2, reviseRegressionBar: bar({ maxOrphanIncrease: 2 }) }),
+    );
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[1].lint.metrics.orphanCount).toBe(2);
+    expect(history.rounds[1].lint.metrics.symmetryScore).toBe(1);
+    expect(history.stopReason).toBe("round-cap");
+  });
+
+  it("rejects a pass that loses half the sprite — relatively, not absolutely", async () => {
+    // 32 cells → 16. The relative drop is 0.5 and fires; the absolute drop is
+    // 0.0625, which no bar in 0..1 that also permits normal work could catch.
+    const halved = slabWithout(8, 9);
+    const { deps } = harness({
+      generate: [draftReply(SLAB_ROWS)],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(SLAB_ROWS, halved, "tightened the silhouette")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 3 }));
+
+    expect(history.rounds[0].lint.metrics.coverage).toBe(0.125);
+    expect(history.stopReason).toBe("revise-regressed");
+    expect(history.rounds).toHaveLength(1);
+    expect(history.rounds[0].doc.rows).toEqual(SLAB_ROWS);
+  });
+
+  it("accepts a pass losing exactly a quarter of the sprite — the boundary", async () => {
+    // 32 cells → 24: a relative drop of exactly 0.25, which `maxCoverageDrop:
+    // 0.25` admits. Symmetry stays 1 and no orphan appears, so this isolates
+    // the comparison operator.
+    const trimmed = slabWithout(9);
+    const { deps } = harness({
+      generate: [draftReply(SLAB_ROWS)],
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(SLAB_ROWS, trimmed, "trimmed one row")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 2 }));
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[1].doc.rows).toEqual(trimmed);
+    expect(history.rounds[1].lint.metrics.coverage).toBe(0.09375);
+    expect(history.stopReason).toBe("round-cap");
+  });
+
+  // -- before-vs-after, per round -------------------------------------------
+
+  it("compares each round against ITS OWN pre-revise document", async () => {
+    // Round 1 revises cleanly and is kept; round 2's pass wrecks the result and
+    // is discarded. An implementation that compared the candidate with itself —
+    // or that computed the baseline once, before the loop — gets one of these
+    // two rounds wrong.
+    const afterFill = DRAFT_ROWS.map((row, y) => (y === 0 ? "1".repeat(16) : row));
+    const wrecked = afterFill.map((row, y) => (y === 0 ? `${".".repeat(8)}11111111` : row));
+    const { deps } = harness({
+      generate: [draftReply()],
+      vision: [HIGH],
+      chatWithTools: [fillRowTurn(0), rewriteTurn(afterFill, wrecked, "cleared the left")],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 4 }));
+
+    expect(history.rounds).toHaveLength(2);
+    expect(history.rounds[0].doc.rows).toEqual(DRAFT_ROWS);
+    expect(history.rounds[1].doc.rows).toEqual(afterFill);
+    expect(history.rounds[1].lint.metrics.symmetryScore).toBe(1);
+    expect(history.rounds[1].revise?.summary).toBe("cleared the left");
+    expect(history.stopReason).toBe("revise-regressed");
+  });
+
+  it("lets empty-diff win when the pass changed nothing at all", async () => {
+    // An unchanged grid has unchanged metrics, so the guard cannot fire on it —
+    // and `empty-diff` is the honest reason. Pinned so the two verdicts do not
+    // trade places if the checks are ever reordered.
+    const { deps } = harness({
+      generate: [draftReply()],
+      vision: [HIGH],
+      chatWithTools: [NOOP_TURN],
+    });
+
+    const history = await run(deps, INPUT, cfg({ maxRounds: 3 }));
+
+    expect(history.stopReason).toBe("empty-diff");
+    expect(history.stopReason).not.toBe("revise-regressed");
+  });
+});
+
+describe("applyFeedback — the revise regression guard", () => {
+  it("guards the user's pass too — one code path, per §7.3", async () => {
+    const first = harness({
+      generate: [draftReply(WAVE11_ROUND_1)],
+      vision: [CONVERGED],
+    });
+    const history = await run(first.deps, DOG_INPUT, cfg({ maxRounds: 3 }));
+    expect(history.rounds).toHaveLength(1);
+
+    const { deps, stub } = harness({
+      vision: [HIGH],
+      chatWithTools: [rewriteTurn(WAVE11_ROUND_1, WAVE11_ROUND_2, WAVE11_SUMMARY)],
+    });
+    const next = await applyFeedback(deps, history, "make it look more like a dog", 0, cfg());
+
+    expect(next.stopReason).toBe("revise-regressed");
+    expect(next.rounds).toHaveLength(1);
+    expect(next.rounds[0].doc.rows).toEqual(WAVE11_ROUND_1);
+    // Phase two still ran on the source round — §7.3 writes the pass's summary
+    // onto the round it revised from, rejected or not.
+    expect(next.rounds[0].revise?.summary).toBe(WAVE11_SUMMARY);
+    expect(next.rounds[0].timings.reviseMs).not.toBeNull();
+    // The loop stopped: no critique of a document that was never kept.
+    expect(countCalls(stub, "vision")).toBe(0);
+    expect(next.finalState).toBe("AWAITING_USER");
+    expect(next.outcome).toBe("completed");
+  });
+
+  it("does not block a user's pass that leaves the metrics alone", async () => {
+    const first = harness({ generate: [draftReply()], vision: [CONVERGED] });
+    const history = await run(first.deps, INPUT, cfg({ maxRounds: 3 }));
+
+    const { deps } = harness({ vision: [CONVERGED], chatWithTools: [fillRowTurn(0)] });
+    const next = await applyFeedback(deps, history, "fill the top row", 0, cfg({ maxRounds: 3 }));
+
+    expect(next.rounds).toHaveLength(2);
+    expect(next.stopReason).toBe("no-high-severity");
+    expect(next.rounds[1].userFeedback).toBe("fill the top row");
   });
 });
 
