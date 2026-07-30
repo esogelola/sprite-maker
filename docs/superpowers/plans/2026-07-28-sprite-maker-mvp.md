@@ -626,6 +626,73 @@ Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is roun
 
 ---
 
+## Wave 6b — the shape DSL draft (spec A10, A11, A12)
+
+**Why:** Wave 10 booted the app and its first real generation proved the draft stage does not work. Benchmarks (`captures/2026-07-30-generator-capability-benchmark.txt`, `captures/2026-07-30-shape-dsl-benchmark.txt`) established that no local model can write the grid, and that the same model composes a recognisable sprite from shape operations.
+
+**Whitelist.** Create: `src/main/dsl.ts`, `tests/main/dsl.test.ts`. Modify: `src/main/draft.ts`, `src/main/prompts/draft.ts`, `tests/main/draft.test.ts`, `src/shared/schema.ts`, `tests/shared/schema.test.ts`.
+
+Yes, `schema.ts` reopens. `DrawOp` and `draftGaugeBar`/`maxDraftBatches`/`callTimeoutFloorMs` are contracts, and the alternative is a sixth schema wave. Waves 11–14 do not need it after this.
+
+| Change | Detail |
+|---|---|
+| `src/main/dsl.ts` — new | `applyOp(grid, op, paletteSize)`, `renderOps(ops, size, paletteSize)`, `gauge(grid)`. **Pure**, no model, no I/O — the same discipline as `shared/grid.ts`, and it must route every write through `setPixel` so palette and bounds validation stay in one place. |
+| `DrawOp` in schema | The five ops from §6.2a. `index` is a row character (`"."` or `0`–`f`), not a number — the model sees the palette as characters. |
+| `HarnessConfig` | add `maxDraftBatches` (5), `draftGaugeBar` (`{minColours: 3, minCoverage: 0.12, maxCoverage: 0.80, minDistinctRows: 8}`), `callTimeoutFloorMs` (45000). |
+| `draft()` | becomes the A11 gauge loop. Emits ops, renders, measures, and **the harness stops when the bar clears** — the model never once set `done: true` in the benchmark. |
+| `Round.timings` / draft prompt | the draft call sends `format` as a **JSON Schema** for the op array, not `format: "json"`. Grammar-constrained decoding is what made row width unrepresentable; the same applies to op shape. |
+
+**Ops are clamped, not rejected.** A model that says `cx: 20` on a 16-wide canvas meant "near the right edge". `applyOp` clamps to canvas and draws what it can; only a wholly-out-of-bounds op is a no-op. Rejecting would waste a batch on an arithmetic slip, which is the same reasoning as §6.3's repair table.
+
+**Row-length repair becomes unreachable on the draft path** — there is no width to get wrong. `normalize` stays for documents loaded from disk. Say so in a comment; do not delete it.
+
+**Steps.** Failing tests first, as always. Then: `dsl.ts` with the five ops and `gauge`; schema additions; `draft()` rewritten as the loop; prompt rewritten to teach ops rather than rows; the `callTimeoutMs` floor.
+
+**Acceptance:**
+1. `npm test` green (baseline 1166); `npx tsc --noEmit` clean; suite passes with `globalThis.fetch` stubbed to throw.
+2. **`mirror_x` reproduces the left half exactly** — every benchmark run reached for it, and character sprites depend on it.
+3. **`applyOp` clamps rather than rejecting**: `cx: 20` on a 16-wide canvas draws a partial ellipse; a fully-outside op is a silent no-op.
+4. **Every write routes through `shared/grid.ts`** — grep `dsl.ts` for direct row splicing and find none. An off-palette `index` is rejected there, not in the DSL.
+5. **`gauge` is exact** on hand-built grids: coverage, colour count, bbox, distinct rows. Probe the **zero case** — an empty grid must give `coverage: 0`, `colours: 0`, and a representable bbox, not `NaN` or a crash. (Falsy zero has near-missed three times in this project.)
+6. **The loop stops on the first batch that clears the bar** — assert exactly one model call when batch 1 is good, and that a weak batch draws more. This is A11's whole point; a loop that always runs 5 batches has missed it.
+7. **An empty `ops` array stops the loop** rather than spinning.
+8. `callTimeoutMs` respects `callTimeoutFloorMs`: a 16×16 gets the floor, not `120000 × 256/1024`.
+9. A **live** draft against `qwen3-vl:8b-instruct-q4_K_M` produces a sprite clearing the gauge bar, captured to `captures/2026-07-30-wave-6b-live-draft.txt`. **Use the 6 GB model, not the 19 GB one — the machine is memory-constrained.**
+10. Only whitelisted files touched.
+
+---
+
+## Wave 10b — the IPC write race (from Wave 10's review)
+
+**Why:** Wave 10's reviewer would have rejected. `currentSession` is a read-modify-write across an `await` with no single-flight guard, which reopens audit blocker B12 through concurrency instead of renderer state.
+
+Reproduced by the reviewer: **Accept during an in-flight run returns `{ok: true, acceptedRound: 1}`, then the run resolves and overwrites it with `acceptedRound: null`.** The user's Accept is gone and they were told it worked. Same for `setPixel`. Two concurrent `applyFeedback` calls lose one. That is §8's own sentence — "hand-editing then exporting produced a PNG without the edits and without an error" — by a different route, and `App.tsx`'s `busy` flag is renderer state, which this wave's whole argument says is not an authority.
+
+**Whitelist.** Modify: `src/main/ipc.ts`, `tests/main/ipc.test.ts`, `tsconfig.json`.
+
+| Fix | Detail |
+|---|---|
+| **Single-flight the session** | One in-flight mutation at a time. A second `run`/`applyFeedback`/`accept`/`setPixel` while one is in flight returns `{ok: false, code: "busy"}` — never a silent overwrite after `ok: true`. |
+| **`currentSession` is live during a run** | It is `null` for a run's whole duration today, so every round-indexed method answers `no-session` while rounds are already on screen and on disk. The wave's own capture proves it: `getSessionPath` returned the directory because main did not believe a session existed. Write it as rounds are appended — `persist` already fires per round. |
+| **Recompute `diffFromPrev` in `replaceRound`** | §8 defines the filmstrip as replaying `diffFromPrev`; a hand edit leaves the stored diff no longer reproducing its round, so the filmstrip renders the pre-edit frame. `ipc.ts` claims the recompute in a comment; nothing asserts it. |
+| **Persist after `accept` and after `setPixel`** | Both are argued for in comments and tested by nothing. §11's first bar and Wave 14 read `acceptedRound` off the artifact. |
+| **Guard the preload path** | Mutating `webPreferences.preload` to `index.mjs` is invisible to `npm test` — the wave's headline blocker has no cheap guard. Assert the constant ends in `.cjs`, or `existsSync` it at startup. |
+| **`tsconfig.json` include `e2e/**` and `playwright.config.ts`** | 347 lines of the wave's own evidence code are never typechecked. Both compile clean when included, so this is latent. Same clause Wave 13 already adds for `bench/**`. |
+| **Distinguish error codes** | `errorCode` collapses every `RangeError` to `"bad-index"`, so an unknown model role, an empty model name and a bad index are indistinguishable to the renderer §8 says branches on `code`. A Zod failure escapes as `code: "error"` with a raw issue array as `message`, unrenderable in a status bar, while `bad-input` sits unused. |
+| **`setPixel` after `accept`** | currently mutates the accepted document without clearing `acceptedRound` or leaving a record. Decide and test: either refuse, or clear the acceptance. |
+
+**Acceptance:**
+1. `npm test` green; `npx tsc --noEmit` clean **and now covering `e2e/`**.
+2. **Accept during an in-flight run does not lose the acceptance** — reviewer's exact scenario, asserted on the persisted artifact.
+3. **A second mutation while one is in flight returns `{ok:false, code:"busy"}`** — never `ok: true` followed by a silent discard.
+4. **`currentSession` is non-null once round 1 is snapshotted**, not only after `run()` resolves.
+5. `diffFromPrev` after a hand edit reproduces the edited round.
+6. `accept` and `setPixel` both reach disk.
+7. A mutant pointing the preload at `.mjs` is caught by `npm test`.
+8. Only whitelisted files touched.
+
+---
+
 ## Deferred — cancellation
 
 Flagged independently by Waves 8 and 9. **A run in flight cannot be stopped.** `revise()` takes no `signal`, so the only bound is the per-call area-scaled `callTimeoutMs`; a 3-round run is minutes (§12) with no Stop button behind it. A user who mistypes a prompt and presses Generate waits it out.
