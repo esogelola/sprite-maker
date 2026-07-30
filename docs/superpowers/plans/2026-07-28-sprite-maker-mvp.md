@@ -626,6 +626,14 @@ Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is roun
 
 ---
 
+## Deferred — cancellation
+
+Flagged independently by Waves 8 and 9. **A run in flight cannot be stopped.** `revise()` takes no `signal`, so the only bound is the per-call area-scaled `callTimeoutMs`; a 3-round run is minutes (§12) with no Stop button behind it. A user who mistypes a prompt and presses Generate waits it out.
+
+Not in §2's MVP scope, and deliberately not invented mid-wave by either implementer — the right call, since threading a `signal` from the renderer through IPC through `run()` into `revise()`'s loop is a design decision, not a patch. **Recorded here as the first candidate after reference-image input**, and worth deciding before Wave 12 builds the gate bar, since a Stop button changes that component's shape.
+
+---
+
 ## Wave 10 — Electron shell, build, IPC, Playwright
 
 **Goal:** The app boots, the renderer reaches the pipeline, and there is a **build**. Minimal UI.

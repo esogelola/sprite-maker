@@ -1,0 +1,138 @@
+Wave 9 — pipeline event trace
+==============================
+
+Captured: 2026-07-29
+Source:   tests-equivalent scenarios over tests/stubs/ollama.ts (createStubClient).
+          Zero inference; the whole capture reproduces with Ollama stopped.
+Spec:     §7.1 state machine, §7.2 stop conditions, §7.3 feedback, §6.7 the two-phase round.
+
+Every transition emits a `state` event. `REVISING` additionally emits one
+`revise-turn` per turn (§7.1: the longest stage emitted nothing in v1). A `round`
+event carries the whole snapshot, and fires TWICE for a revised round — once at
+phase one (revise=null) and once at phase two, after the revise transition has
+filled `revise` and `timings.reviseMs`.
+
+`state.round` is 0 before round 1 exists — PipelineEvent.round is nonnegative()
+deliberately, and consumers may not assume >= 1.
+
+------------------------------------------------------------------------------
+1. Converging on the first critique — the intended success path (§7.2)
+  Blocker B01: v1 snapshotted only on the REVISING exit, so this run returned rounds: [].
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=cd9ba160 parent=null critique=degraded:false filtered=0 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        AWAITING_USER  round=1
+
+  => rounds=1 stopReason=no-high-severity finalState=AWAITING_USER outcome=completed draftFailures=0 persists=2
+     error=null
+
+------------------------------------------------------------------------------
+2. Three critiques, two revise passes — round-cap (§7.5)
+  maxRounds bounds CRITIQUES. Note the two round events per revised round: phase one then phase two.
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=b1f09840 parent=null critique=degraded:false filtered=1 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        REVISING       round=1
+  revise-turn  round=1 turn=1/40
+  round        round=1 doc=b1f09840 parent=null critique=degraded:false filtered=1 diffFromPrev=null revise={turns:1,hitCap:false} (phase 2) feedback=null
+  state        LINTING        round=2
+  state        CRITIQUING     round=2
+  round        round=2 doc=3560925a parent=b1f09840 critique=degraded:false filtered=1 diffFromPrev=16 cells revise=null (phase 1) feedback=null
+  state        REVISING       round=2
+  revise-turn  round=2 turn=1/40
+  round        round=2 doc=3560925a parent=b1f09840 critique=degraded:false filtered=1 diffFromPrev=16 cells revise={turns:1,hitCap:false} (phase 2) feedback=null
+  state        LINTING        round=3
+  state        CRITIQUING     round=3
+  round        round=3 doc=942ec674 parent=3560925a critique=degraded:false filtered=1 diffFromPrev=16 cells revise=null (phase 1) feedback=null
+  state        AWAITING_USER  round=3
+
+  => rounds=3 stopReason=round-cap finalState=AWAITING_USER outcome=completed draftFailures=0 persists=6
+     error=null
+
+------------------------------------------------------------------------------
+3. A revise pass that changed nothing — empty-diff (§7.2)
+  Computed as diff(docBefore, docAfter) on the revise transition, never read from diffFromPrev.
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=b5e29c7c parent=null critique=degraded:false filtered=1 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        REVISING       round=1
+  revise-turn  round=1 turn=1/40
+  round        round=1 doc=b5e29c7c parent=null critique=degraded:false filtered=1 diffFromPrev=null revise={turns:1,hitCap:false} (phase 2) feedback=null
+  state        AWAITING_USER  round=1
+
+  => rounds=1 stopReason=empty-diff finalState=AWAITING_USER outcome=completed draftFailures=0 persists=3
+     error=null
+
+------------------------------------------------------------------------------
+4. Two unparseable critiques — critic-failed (§6.4, §7.2)
+  Never reported as no-high-severity: the sprite did not pass a critique that never ran.
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=78200f0e parent=null critique=degraded:true filtered=0 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        AWAITING_USER  round=1
+
+  => rounds=1 stopReason=critic-failed finalState=AWAITING_USER outcome=completed draftFailures=0 persists=2
+     error=null
+
+------------------------------------------------------------------------------
+5. A draft rejected twice — FAILED (§6.3, §9, A9)
+  One DRAFTING event per attempt so the status bar can say 'retrying draft'; both attempts land in draftFailures.
+
+  state        DRAFTING       round=0
+  state        DRAFTING       round=0
+  state        FAILED         round=0
+
+  => rounds=0 stopReason=null finalState=FAILED outcome=failed draftFailures=2 persists=1
+     error="DraftRejectedError: Draft rejected: 256 repaired cells exceeded repairRejectThreshold. Raw output was 34 characters."
+
+------------------------------------------------------------------------------
+6. The turn cap — revise-turn progress on the longest stage (§7.1)
+  The agent narrates instead of editing; every turn counts against the cap.
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=1978eedb parent=null critique=degraded:false filtered=1 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        REVISING       round=1
+  revise-turn  round=1 turn=1/4
+  revise-turn  round=1 turn=2/4
+  revise-turn  round=1 turn=3/4
+  revise-turn  round=1 turn=4/4
+  round        round=1 doc=1978eedb parent=null critique=degraded:false filtered=1 diffFromPrev=null revise={turns:4,hitCap:true} (phase 2) feedback=null
+  state        AWAITING_USER  round=1
+
+  => rounds=1 stopReason=empty-diff finalState=AWAITING_USER outcome=completed draftFailures=0 persists=3
+     error=null
+
+------------------------------------------------------------------------------
+7. User feedback re-entering at REVISING (§7.3)
+  The run converges, then applyFeedback(roundIndex=0) revises round 1 and appends round 2 parented to it.
+
+  state        DRAFTING       round=0
+  state        LINTING        round=1
+  state        CRITIQUING     round=1
+  round        round=1 doc=9a8bfc5e parent=null critique=degraded:false filtered=0 diffFromPrev=null revise=null (phase 1) feedback=null
+  state        AWAITING_USER  round=1
+
+  --- applyFeedback("give it a bushy tail", roundIndex=0) ---
+
+  state        REVISING       round=1
+  revise-turn  round=1 turn=1/40
+  round        round=1 doc=9a8bfc5e parent=null critique=degraded:false filtered=0 diffFromPrev=null revise={turns:1,hitCap:false} (phase 2) feedback=null
+  state        LINTING        round=2
+  state        CRITIQUING     round=2
+  round        round=2 doc=dc820751 parent=9a8bfc5e critique=degraded:false filtered=0 diffFromPrev=16 cells revise=null (phase 1) feedback="give it a bushy tail"
+  state        AWAITING_USER  round=2
+
+  => rounds=2 stopReason=no-high-severity finalState=AWAITING_USER outcome=completed draftFailures=0 persists=5
+     error=null
+
+------------------------------------------------------------------------------
