@@ -468,6 +468,14 @@ Two things the original scaling did not account for:
 
 Under A10 the draft emits 8–20 operations rather than `w × h` characters, so **draft cost no longer scales with canvas area at all** — a 64×64 sprite is about as many ops as a 16×16. Area scaling now describes only the `REVISE` stage, where per-cell edits genuinely do grow with the canvas. Re-derive both numbers from `Round.timings` once the bench has data.
 
+**Amendment A13 — every model call is seeded and temperature-controlled.** `HarnessConfig` gains `seed: number | null` (default `null` = non-deterministic) and `temperature: number` (default `0.6`). Every stage passes both through `options`.
+
+Measured: **no stage passed `options` at all.** There was no temperature and no seed anywhere, so Ollama's defaults applied and two identical invocations of `run()` differed in round count, stop reason and final sprite. §13's bench exists to tune `confidenceFloor`, `suggestConfidenceFloor` and `maxRounds`, and it cannot attribute a difference to a config change when the baseline is not reproducible. Every measurement taken before this amendment is n=1 against unquantified variance — including the benchmarks that produced A10 and A11, which were large enough effects to survive that, and the revise comparison in `2026-07-30-shape-dsl-benchmark.txt`, which was not.
+
+A seed makes generation deterministic for a **given prompt**; distinct prompts under one seed still differ, so one seed per run is sufficient and per-call derivation is unnecessary.
+
+`seed: null` must remain the shipped default. A fixed default seed would make every user's first sprite for a given prompt identical, which is worse than variance for a creative tool. The bench sets it; the app does not.
+
 **`run()` re-parses its config on entry.** The schema's guards are worthless if a caller can hand-build `{...DEFAULT_HARNESS_CONFIG, maxRounds: 0}` and bypass them.
 
 The config is serialized into `SessionHistory` on every run. Without that, two benchmark runs cannot be compared — a difference might come from the change under test or from a limit that was altered and forgotten.
