@@ -1,0 +1,112 @@
+Shape-operation DSL — the model composes, the interpreter draws
+================================================================
+Date:   2026-07-30
+Model:  qwen3-vl:8b-instruct-q4_K_M (6 GB — the comfortable local option)
+Why:    The generator benchmark (2026-07-30) showed no local 8B model can
+        emit a pixel grid directly. User proposed "a mix of an improved
+        prompt and more defined tools ... some reasoning on placement and
+        gauge of where they are at". This tests the tools half.
+
+HEADLINE: The same 8B model that produced structured noise when asked to
+          write a grid produces a recognisable 5-colour sprite when asked
+          to compose shape operations. One shot, no feedback loop yet.
+
+
+THE CHANGE
+----------
+Before: the model emits 16 rows of exactly 16 characters — 256 cells of
+exact bookkeeping, blind, in one pass.
+
+After: the model emits 8-20 operations and an interpreter draws them.
+
+  {"op":"ellipse","cx":8,"cy":6,"rx":4,"ry":3,"index":"4"}
+  {"op":"fill_rect","x0":5,"y0":9,"x1":10,"y1":13,"index":"4"}
+  {"op":"line","x0":3,"y0":2,"x1":6,"y1":5,"index":"0"}
+  {"op":"mirror_x","axis":8}
+  {"op":"clear","x0":0,"y0":0,"x1":3,"y1":3}
+
+The model never counts characters. It reasons about placement, which the
+earlier benchmark showed it CAN do (the VL model drew tapered symmetric
+structure) — and the interpreter does the counting, which the earlier
+benchmark showed it CANNOT do.
+
+
+RESULTS — 8B VL model, one call each
+-------------------------------------
+"a sitting red fox"  17.7s  511tok  13 ops  coverage .34  colours 5  rows 12/16
+  ......222.......      ears
+  .....c22cc......
+  ....2c22c22.....
+  ...4cccccc44....      face
+  ...44c00c444....      eyes (00)
+  ..444c44c4444...
+  ...444004444....
+  ...444554444....
+  ....0455404.....      body
+  ....404404......
+  ....444444......      legs
+  ....444444......
+  ops: ellipse fill_rect ellipse ellipse line line ellipse ellipse
+       fill_rect line line mirror_x clear
+
+"a red heart"        20.7s  197tok   5 ops  coverage .30  colours 2  rows  8/16
+  .......00.......
+  .......00.......
+  .......444......
+  .....4444444....
+  ....444444444...
+  ...44444444444..
+  ....444444444...
+  .....44444444...
+  ......4444444...
+
+"a green tree"       24.1s  288tok   7 ops  coverage .38  colours 1  rows  6/16
+  a solid green mass with a taper — the weakest of the three, and the
+  only one that ignored the three-colour instruction.
+
+
+AGAINST THE SAME MODEL, SAME SUBJECTS, DIRECT GRID EMISSION
+------------------------------------------------------------
+  grid mode:  1 colour, structured noise, scattered single pixels
+  DSL mode:   5 colours, ears/eyes/body/legs, correct margin
+
+Same model. Same palette. Same subject. The difference is entirely in
+what the model was asked to produce.
+
+
+WHAT ELSE THE DSL BOUGHT
+-------------------------
+- mirror_x gives symmetry for free. Every one of the three runs used it,
+  unprompted beyond one line of guidance. Character sprites are mostly
+  symmetric, and this removes the hardest part of drawing one.
+- Margins came out right ("keep everything inside x 1-14, y 1-14").
+  Direct emission never respected margins.
+- The ops are legible and debuggable. A wrong sprite is now a wrong
+  op list, which a human can read, and which the revise loop can amend
+  surgically instead of regenerating.
+- Width is not even a question. There is no width to get wrong.
+
+STILL NOT TESTED — the other half of the proposal
+--------------------------------------------------
+"gauge of where they are at": rendering the canvas back to the model
+between operations, plus derived state (coverage, bounding box, colour
+count, ops remaining) so it can correct mid-draw rather than composing
+the whole thing blind. The interpreter already computes all of it; only
+the multi-turn loop is missing, and Wave 8's bounded tool loop is
+already the right harness for it.
+
+Expected to help most on the tree case, where the model committed to a
+single fill and never noticed it had produced a monochrome blob.
+
+
+IMPLICATION FOR THE DESIGN
+---------------------------
+Spec 4.1 chose whole-canvas batch emission over per-pixel placement, on
+correct latency grounds — ~600 place_pixel calls is 12 minutes. But the
+choice was framed as a binary between "one grid" and "one pixel at a
+time". The shape DSL is the third option: ~13 calls, not 600 and not 1,
+each one a spatial decision rather than a bookkeeping step.
+
+place_pixel and fill_row keep their place — they are the right tools for
+the REVISE stage, where the critic has named a specific defect. The DSL
+is for the DRAFT, where the model needs to compose.
