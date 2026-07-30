@@ -113,6 +113,23 @@ export interface Api {
   ): Promise<Result<{ doc: SpriteDoc; lint: LintReport }>>;
   /** Write a PNG and return its path. Wave 13; answers `not-implemented` until then. */
   exportPng(roundIndex: number, scale: ExportScale): Promise<Result<string>>;
+  /**
+   * The session main is holding, or `null` before the first run — plan Wave 11.
+   *
+   * The renderer had no way to *read* a session, only to receive one from a call
+   * that changed it. That works until the first hand edit: `setPixel` answers
+   * `{doc, lint}`, so after a click the renderer's history is stale in three
+   * places it cannot reconstruct — an edit to an earlier round **appended a whole
+   * new round**, an edit to the accepted round **cleared `acceptedRound`**, and
+   * `diffFromPrev` was **recomputed** (`main/ipc.ts`, rule 4). The filmstrip
+   * reads all three.
+   *
+   * A `Result` rather than a bare value even though the read cannot fail: `null`
+   * is a legitimate answer here — "no session yet" — and collapsing it with a
+   * future failure would make the one state the first-run surface has to render
+   * indistinguishable from a broken one.
+   */
+  getSession(): Promise<Result<SessionHistory | null>>;
   /** Where the current session's JSON lives, so Wave 14 can open it. */
   getSessionPath(): Promise<string>;
   /** Subscribe to the pipeline's event stream (§7.1). Returns its own unsubscriber. */
@@ -136,6 +153,7 @@ export const PRELOAD_CHANNELS = {
   accept: "accept",
   setPixel: "set-pixel",
   exportPng: "export-png",
+  getSession: "get-session",
   getSessionPath: "get-session-path",
   // Fact 2: `webContents.send` → `ipcRenderer.on`, not `invoke` → `handle`.
   onEvent: "pipeline-event",
@@ -159,6 +177,7 @@ const api: Api = {
     ipcRenderer.invoke(PRELOAD_CHANNELS.setPixel, roundIndex, x, y, ch),
   exportPng: (roundIndex, scale) =>
     ipcRenderer.invoke(PRELOAD_CHANNELS.exportPng, roundIndex, scale),
+  getSession: () => ipcRenderer.invoke(PRELOAD_CHANNELS.getSession),
   getSessionPath: () => ipcRenderer.invoke(PRELOAD_CHANNELS.getSessionPath),
 
   onEvent(cb: (e: PipelineEvent) => void): () => void {

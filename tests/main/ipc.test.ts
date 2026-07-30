@@ -491,6 +491,109 @@ describe("the session", () => {
 });
 
 // ---------------------------------------------------------------------------
+// getSession — plan Wave 11
+//
+// The read the editor needs and Wave 10 did not have. Every other round-indexed
+// method *changes* the session and answers about the change; `setPixel` in
+// particular answers `{doc, lint}`, which is one round out of a history whose
+// other rounds it may have just rewritten. §8 has the filmstrip render the whole
+// history and the status bar read `acceptedRound` off it, so a surface with no
+// way to re-read is a surface holding a copy that quietly stops being true.
+// ---------------------------------------------------------------------------
+
+describe("getSession", () => {
+  it("answers null before the first run, in an ok envelope", async () => {
+    register(ONE_ROUND);
+
+    const result = await invoke(CHANNELS.getSession);
+
+    // Not a failure: "no session yet" is the first-run state §8 has to render,
+    // and collapsing it into an error would make the empty editor look broken.
+    expect(result.ok).toBe(true);
+    expect(result.value).toBeNull();
+  });
+
+  it("hands back the session a run produced", async () => {
+    register(ONE_ROUND);
+    const history = unwrap<SessionHistory>(await invoke(CHANNELS.run, INPUT));
+
+    const read = unwrap<SessionHistory>(await invoke(CHANNELS.getSession));
+
+    expect(read.sessionId).toBe(history.sessionId);
+    expect(read.rounds).toHaveLength(1);
+    expect(() => SessionHistorySchema.parse(read)).not.toThrow();
+  });
+
+  /**
+   * Rule 6's other half, from the renderer's side.
+   *
+   * `currentSession` is adopted as each round is persisted, so a surface can ask
+   * what exists *now* — and §12 puts a run at several minutes, which is the whole
+   * window in which asking is worth anything. A `getSession` gated behind
+   * `exclusive` would answer `busy` for that entire window.
+   */
+  it("answers during an in-flight run with the rounds already snapshotted", async () => {
+    const gate = gateAtRevise(TWO_ROUNDS);
+    registerClient(gate.client);
+
+    const running = invoke(CHANNELS.run, INPUT);
+    await gate.reached;
+
+    const mid = unwrap<SessionHistory>(await invoke(CHANNELS.getSession));
+    expect(mid.rounds).toHaveLength(1);
+    expect(mid.outcome).toBe("failed"); // §6.7: an unfinished run is a failed run
+
+    gate.release();
+    const finished = unwrap<SessionHistory>(await running);
+    expect(finished.rounds).toHaveLength(2);
+    expect(unwrap<SessionHistory>(await invoke(CHANNELS.getSession)).rounds).toHaveLength(2);
+  });
+
+  /**
+   * The staleness this channel exists to close, stated as one assertion per
+   * thing `setPixel`'s own `{doc, lint}` answer cannot carry.
+   */
+  it("reflects a hand edit that appended a round, and the recomputed diff", async () => {
+    register(TWO_ROUNDS);
+    const before = unwrap<SessionHistory>(await invoke(CHANNELS.run, INPUT));
+    expect(before.rounds).toHaveLength(2);
+
+    // Round index 0 of two: an earlier round, so §8 appends rather than mutates.
+    const edited = unwrap<{ doc: SpriteDoc }>(await invoke(CHANNELS.setPixel, 0, 5, 5, "1"));
+
+    const read = unwrap<SessionHistory>(await invoke(CHANNELS.getSession));
+
+    // The appended round is invisible to `setPixel`'s answer, which carries one
+    // document and no idea how many rounds the session now has.
+    expect(read.rounds).toHaveLength(3);
+    expect(read.rounds[2].doc.id).toBe(edited.doc.id);
+    expect(read.rounds[2].doc.rows[5][5]).toBe("1");
+    // Recomputed against the parent, not carried (`replaceRound` / `appendRound`).
+    expect(read.rounds[2].diffFromPrev).toEqual([
+      { x: 5, y: 5, from: before.rounds[0].doc.rows[5][5], to: "1" },
+    ]);
+    expect(() => SessionHistorySchema.parse(read)).not.toThrow();
+  });
+
+  it("reflects an acceptance that a later edit released", async () => {
+    register(ONE_ROUND);
+    await invoke(CHANNELS.run, INPUT);
+    await invoke(CHANNELS.accept, 0);
+
+    expect(unwrap<SessionHistory>(await invoke(CHANNELS.getSession)).acceptedRound).toBe(1);
+
+    // Editing the accepted document clears the acceptance (`releaseAcceptance`).
+    // The renderer is told none of this by `setPixel`'s `{doc, lint}` answer, and
+    // §8 has the filmstrip mark the accepted frame off exactly this field.
+    await invoke(CHANNELS.setPixel, 0, 0, 0, "1");
+
+    const read = unwrap<SessionHistory>(await invoke(CHANNELS.getSession));
+    expect(read.acceptedRound).toBeNull();
+    expect(read.finalState).toBe("AWAITING_USER");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // setPixel — spec §8, the silent-divergence defect
 // ---------------------------------------------------------------------------
 

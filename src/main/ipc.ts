@@ -115,6 +115,7 @@ export const CHANNELS = {
   accept: "accept",
   setPixel: "set-pixel",
   exportPng: "export-png",
+  getSession: "get-session",
   getSessionPath: "get-session-path",
   // Rule 2. No `ipcMain.handle` for this one, ever.
   onEvent: "pipeline-event",
@@ -775,6 +776,31 @@ export function registerIpc(deps: IpcDeps): void {
           "until Wave 13 builds src/main/export.ts",
       );
     }),
+  );
+
+  /**
+   * Hand the renderer the session main is holding — plan Wave 11.
+   *
+   * The read that makes rule 4 survivable. `setPixel` answers `{doc, lint}`,
+   * which is the edited round and nothing else — so after one click the
+   * renderer's copy of the history is stale in exactly the places rule 4 and
+   * `releaseAcceptance` just changed: a new round may have been **appended**,
+   * `acceptedRound` may have been **cleared**, and `diffFromPrev` was
+   * **recomputed**. §8 has the filmstrip and the status bar read all three.
+   *
+   * **Deliberately not `exclusive`.** It mutates nothing, and §12 puts a run at
+   * several minutes — the whole point of rule 6 (`currentSession` is live for the
+   * duration of a run) is that a surface can ask what exists *now*. Serialising a
+   * read behind a multi-minute write would make the answer arrive after the
+   * question stopped mattering. There is no torn read to guard against either:
+   * every writer above assigns `currentSession` synchronously, so this returns
+   * the state before an edit or the state after it, never half of one.
+   *
+   * Enveloped even though nothing here throws, because `null` is a real answer
+   * and the first-run surface has to be able to tell it from a failure.
+   */
+  ipcMain.handle(CHANNELS.getSession, async () =>
+    envelope<SessionHistory | null>(() => currentSession),
   );
 
   // Cannot fail: with no session there is still an answer, and it is the one
