@@ -680,6 +680,76 @@ describe("critique", () => {
     expect(report.issues[0].id.length).toBeGreaterThan(0);
   });
 
+  // -------------------------------------------------------------------------
+  // A13 — the CRITIQUE stage's options bag
+  //
+  // Asserted on this stage's own recorded call. A mutant that drops `options`
+  // from `critique.ts` alone must fail here and not rely on a draft test to
+  // catch it — that is the whole point of testing all three separately.
+  // -------------------------------------------------------------------------
+
+  it("sends options.seed and options.temperature to the critic — A13", async () => {
+    const client = createStubClient({ vision: [GOOD] });
+    await critique({ client }, SPRITE_32, lint(SPRITE_32), cfgWith({ seed: 99, temperature: 0.25 }));
+
+    expect(client.calls[0].options).toEqual({ seed: 99, temperature: 0.25 });
+  });
+
+  it("keeps seed: 0 and temperature: 0 on the wire — the falsy-zero trap", async () => {
+    const client = createStubClient({ vision: [GOOD] });
+    await critique({ client }, SPRITE_32, lint(SPRITE_32), cfgWith({ seed: 0, temperature: 0 }));
+
+    expect(client.calls[0].options).toEqual({ seed: 0, temperature: 0 });
+  });
+
+  it("OMITS seed when the config seed is null, and still sends temperature", async () => {
+    const client = createStubClient({ vision: [GOOD] });
+    await critique({ client }, SPRITE_32, lint(SPRITE_32), CFG);
+
+    const options = client.calls[0].options;
+    expect(options).toEqual({ temperature: 0.6 });
+    expect("seed" in (options ?? {})).toBe(false);
+    expect(JSON.stringify(options)).not.toContain("seed");
+  });
+
+  it("carries the same options into the REPROMPT", async () => {
+    // The reprompt is a second call through the same `ask` closure. A seeded
+    // bench that seeded only the first of two calls would report a
+    // reproducibility it does not have.
+    const client = createStubClient({ vision: ["nope", GOOD] });
+    await critique({ client }, SPRITE_32, lint(SPRITE_32), cfgWith({ seed: 5, temperature: 0 }));
+
+    expect(client.calls).toHaveLength(2);
+    for (const call of client.calls) {
+      expect(call.options).toEqual({ seed: 5, temperature: 0 });
+    }
+  });
+
+  it("puts seed INSIDE options, never at the top level", async () => {
+    // Read off the raw request: `RecordedCall` has no `seed` field, so a
+    // top-level one would vanish from the log rather than fail an assertion.
+    const seen: Record<string, unknown>[] = [];
+    const unscripted = async (): Promise<never> => {
+      throw new Error("critique() called a method other than vision()");
+    };
+    const client: OllamaClient = {
+      listModels: unscripted,
+      generate: unscripted,
+      chatWithTools: unscripted,
+      async vision(req: VisionRequest): Promise<string> {
+        seen.push(req as unknown as Record<string, unknown>);
+        return GOOD;
+      },
+    };
+
+    await critique({ client }, SPRITE_32, lint(SPRITE_32), cfgWith({ seed: 7 }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].seed).toBeUndefined();
+    expect(seen[0].temperature).toBeUndefined();
+    expect(seen[0].options).toEqual({ seed: 7, temperature: 0.6 });
+  });
+
   it("reprompts exactly once, carrying the validation error and the image again", async () => {
     const client = createStubClient({ vision: ["I think it looks nice.", GOOD] });
     const report = await critique({ client }, SPRITE_32, lint(SPRITE_32), CFG);

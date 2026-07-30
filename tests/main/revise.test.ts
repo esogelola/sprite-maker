@@ -1103,6 +1103,84 @@ describe("revise — model binding and think suppression", () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // A13 — the REVISE stage's options bag
+  //
+  // Its own tests, on its own recorded calls: a mutant that drops `options`
+  // from `revise.ts` alone must fail here. This is also the stage with the most
+  // calls per round — up to 40 — so an unseeded turn here is where a
+  // "reproducible" run would actually diverge.
+  // -------------------------------------------------------------------------
+
+  it("sends options.seed and options.temperature on EVERY turn — A13", async () => {
+    const stub = createStubClient({
+      chatWithTools: [calls(call("c1", "place_pixel", { x: 0, y: 0, index: 1 }))],
+    });
+
+    await revise({ client: stub }, BLANK, [], cfg({ maxReviseTurns: 5, seed: 1234, temperature: 0.25 }));
+
+    expect(stub.calls).toHaveLength(5);
+    for (const recorded of stub.calls) {
+      expect(recorded.options).toEqual({ seed: 1234, temperature: 0.25 });
+    }
+  });
+
+  it("keeps seed: 0 and temperature: 0 on the wire — the falsy-zero trap", async () => {
+    const stub = createStubClient({
+      chatWithTools: [calls(call("c1", "done", { summary: "ok" }))],
+    });
+
+    await revise({ client: stub }, BLANK, [], cfg({ seed: 0, temperature: 0 }));
+
+    expect(stub.calls[0].options).toEqual({ seed: 0, temperature: 0 });
+  });
+
+  it("OMITS seed when the config seed is null, and still sends temperature", async () => {
+    const stub = createStubClient({
+      chatWithTools: [calls(call("c1", "done", { summary: "ok" }))],
+    });
+
+    await revise({ client: stub }, BLANK, [], cfg());
+
+    const options = stub.calls[0].options;
+    expect(options).toEqual({ temperature: 0.6 });
+    expect("seed" in (options ?? {})).toBe(false);
+    expect(JSON.stringify(options)).not.toContain("seed");
+  });
+
+  it("reads temperature from the config rather than hardcoding it", async () => {
+    const stub = createStubClient({
+      chatWithTools: [calls(call("c1", "done", { summary: "ok" }))],
+    });
+    await revise({ client: stub }, BLANK, [], cfg({ temperature: 1.9 }));
+    expect(stub.calls[0].options?.temperature).toBe(1.9);
+  });
+
+  it("puts seed INSIDE options, never at the top level", async () => {
+    // Read off the raw request: `RecordedCall` has no `seed` field, so a
+    // top-level one would vanish from the log rather than fail an assertion.
+    const seen: Record<string, unknown>[] = [];
+    const unscripted = async (): Promise<never> => {
+      throw new Error("revise() called a method other than chatWithTools()");
+    };
+    const client: OllamaClient = {
+      listModels: unscripted,
+      generate: unscripted,
+      vision: unscripted,
+      async chatWithTools(req: ChatWithToolsRequest): Promise<ChatTurn> {
+        seen.push(req as unknown as Record<string, unknown>);
+        return calls(call("c1", "done", { summary: "ok" }));
+      },
+    };
+
+    await revise({ client }, BLANK, [], cfg({ seed: 7 }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].seed).toBeUndefined();
+    expect(seen[0].temperature).toBeUndefined();
+    expect(seen[0].options).toEqual({ seed: 7, temperature: 0.6 });
+  });
+
   it("offers REVISE_TOOLS on every turn", async () => {
     const stub = createStubClient({
       chatWithTools: [calls(call("c1", "place_pixel", { x: 0, y: 0, index: 1 }))],

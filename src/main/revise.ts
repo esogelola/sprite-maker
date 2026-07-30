@@ -49,6 +49,7 @@ import {
   setPixel,
   type Grid,
 } from "@shared/grid";
+import { modelOptions } from "@shared/schema";
 import type {
   ChatMessage,
   HarnessConfig,
@@ -417,6 +418,11 @@ export async function revise(
       model: cfg.models.generator,
       messages,
       tools: REVISE_TOOLS,
+      // A13, on every turn. This is the stage with the most calls per round —
+      // up to 40 — so one unseeded turn here is where a run that called itself
+      // reproducible would actually diverge. `seed` is absent entirely when the
+      // config's is `null`; it is never sent as a literal null.
+      options: modelOptions(cfg),
       // Spec A8. `false`, and top-level — this is the stage where it matters
       // most: 40 turns times 3 rounds otherwise pay for a reasoning trace that
       // lands in a field nothing reads. Measured 86x token reduction.

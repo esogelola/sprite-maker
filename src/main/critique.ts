@@ -42,7 +42,7 @@
 import type { OllamaClient } from "@main/ollama";
 import { buildCritiqueReprompt, buildCritiquePrompt } from "@main/prompts/critique";
 import { pickCriticBackground, toPng } from "@main/render";
-import { CritiqueReportSchema } from "@shared/schema";
+import { CritiqueReportSchema, modelOptions } from "@shared/schema";
 import type {
   CritiqueReport,
   HarnessConfig,
@@ -437,6 +437,12 @@ export async function critique(
         prompt,
         images: [image],
         format: "json",
+        // A13. Inside `options`, where `seed` and `temperature` belong — unlike
+        // `think` below. Built once per `critique()` and used by BOTH calls, so
+        // the reprompt is seeded exactly as the first attempt was: a seeded run
+        // whose second call sampled freely would report a reproducibility it
+        // does not have.
+        options: modelOptions(cfg),
         think: false,
         signal: controller.signal,
       });

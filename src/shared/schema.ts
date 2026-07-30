@@ -481,6 +481,35 @@ export const HarnessConfigSchema = z.strictObject({
       minDistinctRows: z.int().positive().default(8),
     })
     .default({ minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 }),
+  /**
+   * The sampling seed every stage sends — spec §6.8, amendment A13.
+   *
+   * **`null` is the shipped default and must stay that way.** A fixed default
+   * would make every user's first sprite for a given prompt identical, which for
+   * a creative tool is a worse failure than the non-determinism it removes. The
+   * bench sets a seed; the app does not.
+   *
+   * `null` is also the *only* spelling of "non-deterministic" here. Ollama's own
+   * wire protocol spells it `-1`, and allowing both would give this config two
+   * values meaning the same thing and a third — `0` — that looks like a third
+   * absence and is in fact a perfectly ordinary seed. Negatives are rejected so
+   * that cannot happen; `modelOptions` turns `null` into an *absent key*, which
+   * is what leaves Ollama's default in force.
+   *
+   * `0` is legal and load-bearing. Every falsy check on this field reads it as
+   * unset, and a bench run is exactly the caller that would set it.
+   */
+  seed: z.int().nonnegative().nullable().default(null),
+  /**
+   * The sampling temperature every stage sends — spec §6.8, amendment A13.
+   *
+   * `0` is legal and is the single most useful value here: it is what a bench
+   * run sets to make a comparison mean something. A falsy check drops it and
+   * silently restores Ollama's default, which is the defect this field exists
+   * to remove. Bounded at 2 because beyond that the sampler is noise, and a
+   * value that large is a units mistake rather than an intention.
+   */
+  temperature: z.number().min(0).max(2).default(0.6),
   models: ModelsSchema,
 });
 
@@ -822,9 +851,63 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   callTimeoutFloorMs: 45000,
   maxDraftBatches: 5,
   draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
+  // A13. `null`, deliberately — see the field. The bench sets a seed; the app
+  // ships without one, because a default seed makes every user's first fox the
+  // same fox.
+  seed: null,
+  temperature: 0.6,
   // Both roles, one model — see `ModelsSchema`. `qwen3:8b` cannot draw.
   models: {
     generator: "qwen3-vl:8b-instruct-q4_K_M",
     critic: "qwen3-vl:8b-instruct-q4_K_M",
   },
 };
+
+// ---------------------------------------------------------------------------
+// the options bag every stage sends — spec §6.8 A13, §6.9
+// ---------------------------------------------------------------------------
+
+/**
+ * What `modelOptions` produces: Ollama's `options` bag, as this app fills it.
+ *
+ * A **type alias**, not an interface, and that is load-bearing: `OllamaOptions`
+ * in `main/ollama.ts` is `Record<string, unknown> & { think?: … }`, and only a
+ * type alias of an object literal gets the implicit index signature that makes
+ * it assignable. An interface here would compile everywhere except the three
+ * call sites.
+ *
+ * `seed` is optional because absence is the whole mechanism — see below.
+ */
+export type ModelOptions = { temperature: number; seed?: number };
+
+/**
+ * The `options` every model call carries — spec amendment A13.
+ *
+ * One function, three call sites (`draft`, `critique`, `revise`), because the
+ * measured defect was that **no stage passed `options` at all**: there was no
+ * temperature and no seed anywhere, so two identical `run()` invocations
+ * differed in round count, stop reason and final sprite, and §13's bench could
+ * not attribute any difference to the config change under test.
+ *
+ * Two rules, and both of them are the same rule about falsy values:
+ *
+ * **`temperature` is always present, including `0`.** `0` is the most useful
+ * temperature in the system — it is what a bench run sets — and any truthiness
+ * check drops it and restores Ollama's default without saying so.
+ *
+ * **`seed: null` omits the key; it never sends `null`, and never substitutes a
+ * random number.** The point of the default is *Ollama's* non-determinism, not
+ * a source of our own, and an absent key is the only thing that leaves the
+ * far side's default genuinely in force. `seed: 0`, meanwhile, is an ordinary
+ * seed and survives: the check is `!== null`, never `?:` on the value.
+ *
+ * One seed per run is sufficient. A seed makes generation deterministic for a
+ * *given prompt*, and distinct prompts under one seed still differ — so
+ * per-call derivation would be complexity buying nothing.
+ */
+export function modelOptions(cfg: HarnessConfig): ModelOptions {
+  const options: ModelOptions = { temperature: cfg.temperature };
+  // `!== null`, never `if (cfg.seed)`: seed 0 is a seed.
+  if (cfg.seed !== null) options.seed = cfg.seed;
+  return options;
+}

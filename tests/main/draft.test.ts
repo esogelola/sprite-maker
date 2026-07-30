@@ -915,6 +915,80 @@ describe("draft", () => {
   });
 
   // -------------------------------------------------------------------------
+  // A13 — the DRAFT stage's options bag
+  //
+  // Asserted here, on this stage's own recorded call, and not only in
+  // `schema.test.ts`: a stage that forgets to pass `options` at all is exactly
+  // the defect A13 was written for, and `modelOptions` being correct says
+  // nothing about whether anyone calls it.
+  // -------------------------------------------------------------------------
+
+  it("sends options.seed and options.temperature on every draft call — A13", async () => {
+    const stub = createStubClient({ generate: [opsReply(WEAK_OPS)] });
+    await draft({ client: stub }, INPUT_16, cfg({ seed: 1234, temperature: 0.25, maxDraftBatches: 3 }));
+
+    expect(stub.calls).toHaveLength(3);
+    for (const call of stub.calls) {
+      expect(call.options).toEqual({ seed: 1234, temperature: 0.25 });
+    }
+  });
+
+  it("keeps seed: 0 and temperature: 0 on the wire — the falsy-zero trap", async () => {
+    // A bench run sets exactly these. A truthiness check on either drops it and
+    // the run silently reverts to Ollama's defaults.
+    const stub = createStubClient({ generate: [opsReply(GOOD_OPS)] });
+    await draft({ client: stub }, INPUT_16, cfg({ seed: 0, temperature: 0 }));
+
+    expect(stub.calls[0].options).toEqual({ seed: 0, temperature: 0 });
+  });
+
+  it("OMITS seed when the config seed is null, and still sends temperature", async () => {
+    const stub = createStubClient({ generate: [opsReply(GOOD_OPS)] });
+    await draft({ client: stub }, INPUT_16, cfg());
+
+    const options = stub.calls[0].options;
+    expect(options).toEqual({ temperature: 0.6 });
+    expect("seed" in (options ?? {})).toBe(false);
+    expect(JSON.stringify(options)).not.toContain("seed");
+  });
+
+  it("reads temperature from the config rather than hardcoding it", async () => {
+    const stub = createStubClient({ generate: [opsReply(GOOD_OPS)] });
+    await draft({ client: stub }, INPUT_16, cfg({ temperature: 1.9 }));
+    expect(stub.calls[0].options?.temperature).toBe(1.9);
+  });
+
+  it("puts seed INSIDE options, never at the top level — A8's trap in reverse", async () => {
+    // `think` is top-level and must not be in `options`; `seed` and
+    // `temperature` are options keys and must not be top-level. Ollama drops an
+    // unknown top-level field as silently as it drops an unknown option key.
+    //
+    // Read off the *raw request*, not off `RecordedCall`: the stub records only
+    // the fields it knows about, so a top-level `seed` would simply vanish from
+    // the log and the assertion would pass on a request that never carried one.
+    const seen: Record<string, unknown>[] = [];
+    const unscripted = async (): Promise<never> => {
+      throw new Error("draft() called a method other than generate()");
+    };
+    const client: OllamaClient = {
+      listModels: unscripted,
+      vision: unscripted,
+      chatWithTools: unscripted,
+      async generate(req: GenerateRequest): Promise<string> {
+        seen.push(req as unknown as Record<string, unknown>);
+        return opsReply(GOOD_OPS);
+      },
+    };
+
+    await draft({ client }, INPUT_16, cfg({ seed: 7 }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].seed).toBeUndefined();
+    expect(seen[0].temperature).toBeUndefined();
+    expect(seen[0].options).toEqual({ seed: 7, temperature: 0.6 });
+  });
+
+  // -------------------------------------------------------------------------
   // the gauge loop — spec §6.2b, amendment A11
   // -------------------------------------------------------------------------
 

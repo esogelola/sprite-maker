@@ -77,6 +77,7 @@ import { getPalette, type Palette } from "@shared/palettes";
 import {
   DrawOpSchema,
   SpriteDocSchema,
+  modelOptions,
   type DraftFailure,
   type DrawOp,
   type HarnessConfig,
@@ -626,6 +627,10 @@ async function composeAttempt(
       // A10: a JSON Schema, not `format: "json"`. Grammar-constrained decoding
       // is what made row width unrepresentable; the same applies to op shape.
       format,
+      // A13. `seed` and `temperature` are genuine `options` keys and belong
+      // here, unlike `think` below — and `modelOptions` omits `seed` entirely
+      // when the config's is `null`, rather than sending a literal null.
+      options: modelOptions(cfg),
       // Spec A8. Measured 26-50× fewer generated tokens; the `/no_think` prefix
       // v2 specified was inert, so this is a request field and not prompt text.
       think: false,

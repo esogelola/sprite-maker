@@ -24,6 +24,7 @@ import {
   SizeSchema,
   SpriteDocSchema,
   StopReasonSchema,
+  modelOptions,
   type ChatMessage,
   type ChatTurn,
   type Issue,
@@ -964,6 +965,8 @@ describe("HarnessConfigSchema", () => {
       callTimeoutMs: 120000,
       callTimeoutFloorMs: 45000,
       maxDraftBatches: 5,
+      seed: null,
+      temperature: 0.6,
       draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
       models: {
         generator: "qwen3-vl:8b-instruct-q4_K_M",
@@ -1092,7 +1095,11 @@ describe("HarnessConfigSchema", () => {
     }
   });
 
-  it.each(["maxTurns", "temperature", "criticUpscale", "schemaVersion"])(
+  // `temperature` used to sit in this list. A13 made it a real field, so it
+  // moved out — and `top_p` took its place to keep the point the list is making:
+  // an *option* Ollama accepts is not thereby a *config* field, and one that has
+  // not been added must still be rejected rather than silently dropped.
+  it.each(["maxTurns", "top_p", "criticUpscale", "schemaVersion"])(
     "rejects the unknown key %s",
     (k) => {
       expect(HarnessConfigSchema.safeParse({ [k]: 1 }).success).toBe(false);
@@ -1197,6 +1204,120 @@ describe("HarnessConfigSchema", () => {
     for (const [k, v] of Object.entries(DEFAULT_HARNESS_CONFIG)) {
       expect(HarnessConfigSchema.safeParse({ [k]: v }).success).toBe(true);
     }
+  });
+
+  // -- A13: seed and temperature -------------------------------------------
+
+  it("defaults seed to null and temperature to 0.6 — A13", () => {
+    const cfg = HarnessConfigSchema.parse({});
+    expect(cfg.seed).toBe(null);
+    expect(cfg.temperature).toBe(0.6);
+    // Both literals, separately: the schema and `DEFAULT_HARNESS_CONFIG` carry
+    // their own copies and one can be changed without the other.
+    expect(DEFAULT_HARNESS_CONFIG.seed).toBe(null);
+    expect(DEFAULT_HARNESS_CONFIG.temperature).toBe(0.6);
+  });
+
+  it("KEEPS seed: null as the shipped default — a fixed seed is worse than variance", () => {
+    // Pinned as its own named assertion, not left to the 15-field comparison.
+    // A13: a default seed would make every user's first sprite for a given
+    // prompt identical, which for a creative tool is a worse failure than the
+    // non-determinism it removes. The bench sets a seed; the app does not.
+    expect(DEFAULT_HARNESS_CONFIG.seed).toBeNull();
+    expect(typeof DEFAULT_HARNESS_CONFIG.seed).not.toBe("number");
+  });
+
+  it("accepts seed: 0 — a legal seed that a falsy check reads as absent", () => {
+    // The single most likely defect in A13. `0` is a perfectly good seed and
+    // every `if (cfg.seed)` in the codebase would silently drop it.
+    const cfg = HarnessConfigSchema.parse({ seed: 0 });
+    expect(cfg.seed).toBe(0);
+  });
+
+  it("accepts temperature: 0 — the most useful temperature there is", () => {
+    // And the one a bench run sets. `if (cfg.temperature)` drops it.
+    const cfg = HarnessConfigSchema.parse({ temperature: 0 });
+    expect(cfg.temperature).toBe(0);
+  });
+
+  it("accepts an explicit seed and round-trips it", () => {
+    expect(HarnessConfigSchema.parse({ seed: 42 }).seed).toBe(42);
+    expect(HarnessConfigSchema.parse({ seed: null }).seed).toBeNull();
+  });
+
+  it.each([1.5, "7", true, -1])("rejects seed = %s", (v) => {
+    // Non-integers because Ollama's `seed` is an int and a float would be
+    // truncated on the far side; negatives because `null` is this config's one
+    // spelling of "non-deterministic" and `-1` must not become a second.
+    expect(HarnessConfigSchema.safeParse({ seed: v }).success).toBe(false);
+  });
+
+  it.each([-0.1, 2.1, "0.6", null])("rejects temperature = %s", (v) => {
+    expect(HarnessConfigSchema.safeParse({ temperature: v }).success).toBe(false);
+  });
+
+  it("accepts the whole 0..2 temperature range", () => {
+    for (const t of [0, 0.6, 1, 2]) {
+      expect(HarnessConfigSchema.safeParse({ temperature: t }).success).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modelOptions — spec §6.8 A13, §6.9
+// ---------------------------------------------------------------------------
+
+describe("modelOptions", () => {
+  const cfg = (patch: Record<string, unknown> = {}) => HarnessConfigSchema.parse(patch);
+
+  it("always carries temperature", () => {
+    expect(modelOptions(cfg()).temperature).toBe(0.6);
+  });
+
+  it("reads temperature from the config rather than hardcoding it", () => {
+    expect(modelOptions(cfg({ temperature: 1.4 })).temperature).toBe(1.4);
+  });
+
+  it("KEEPS temperature: 0 — the falsy-zero trap", () => {
+    const opts = modelOptions(cfg({ temperature: 0 }));
+    expect(opts.temperature).toBe(0);
+    expect("temperature" in opts).toBe(true);
+  });
+
+  it("OMITS the seed key entirely when seed is null", () => {
+    // Not `seed: null`. Ollama's own non-determinism is the default, and a
+    // literal null on the wire is a value the far side has to interpret.
+    const opts = modelOptions(cfg({ seed: null }));
+    expect("seed" in opts).toBe(false);
+    expect(Object.keys(opts)).toEqual(["temperature"]);
+    expect(JSON.stringify(opts)).not.toContain("seed");
+  });
+
+  it("does not substitute a random seed for null", () => {
+    // The point of `null` is Ollama's non-determinism, not ours. Two calls
+    // must produce the same options bag.
+    expect(modelOptions(cfg())).toEqual(modelOptions(cfg()));
+    expect(modelOptions(cfg())).toEqual({ temperature: 0.6 });
+  });
+
+  it("carries an explicit seed", () => {
+    expect(modelOptions(cfg({ seed: 1234 }))).toEqual({ temperature: 0.6, seed: 1234 });
+  });
+
+  it("KEEPS seed: 0 — the falsy-zero trap, again", () => {
+    const opts = modelOptions(cfg({ seed: 0 }));
+    expect(opts.seed).toBe(0);
+    expect("seed" in opts).toBe(true);
+  });
+
+  it("carries seed 0 and temperature 0 together — the bench's own settings", () => {
+    expect(modelOptions(cfg({ seed: 0, temperature: 0 }))).toEqual({ seed: 0, temperature: 0 });
+  });
+
+  it("carries no key A8 forbids in the options bag", () => {
+    // `think` is a top-level request field; inside `options` Ollama drops it
+    // silently and restores 1433 characters of reasoning per call.
+    expect("think" in modelOptions(cfg())).toBe(false);
   });
 });
 

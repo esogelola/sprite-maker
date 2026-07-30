@@ -1,0 +1,205 @@
+Wave 8b live determinism — does a fixed seed make this pipeline reproducible?
+============================================================================
+Date:   2026-07-30
+Model:  qwen3-vl:8b-instruct-q4_K_M (6 GB — the memory-constrained option)
+Host:   Apple M2 Max (Mac14,5), 34.4 GB, macOS 26.5.2. Ollama 0.32.1.
+Code:   src/shared/schema.ts (modelOptions), src/main/{draft,critique,revise}.ts
+        at Wave 8b — amendment A13
+Probe:  the real DRAFT prompt + JSON Schema format through the real
+        `createOllamaClient`, `think: false`, options built by the same
+        `modelOptions(cfg)` the three stages call. Raw `/api/generate` replies
+        compared byte for byte by sha256 over the whole reply string.
+
+HEADLINE: SEEDING WORKS ON THIS MACHINE. A fixed `options.seed` makes
+          qwen3-vl:8b-instruct-q4_K_M byte-reproducible — at temperature 0 AND
+          at temperature 1, across process restarts, and across a full model
+          eviction and reload. The unseeded default is genuinely
+          non-deterministic, which is what makes that a finding and not an
+          accident. §13's bench can attribute a difference to the config
+          change under test.
+
+ONE CORRECTION TO THE BRIEF, and it matters for how the bench is written:
+          "change only the seed and show they differ" DOES NOT HOLD AT
+          TEMPERATURE 0. At temperature 0 decoding is greedy, the sampler
+          never consults the RNG, and seeds 1234 and 9876 produce the
+          identical 310 bytes (section 2). The seed's effect is only
+          observable where sampling is actually random — section 3 shows it
+          plainly at temperature 1. This is not a defect in the
+          implementation; the option is on the wire either way. It means a
+          bench sweeping seeds to estimate variance must NOT do it at
+          temperature 0, because at temperature 0 there is no variance to
+          estimate.
+
+Prior to A13 no stage passed `options` at all: no temperature, no seed
+anywhere, and two identical `run()` invocations differed in round count, stop
+reason and final sprite.
+
+
+PART 1 — reproducibility, the seed's effect, and the unseeded control
+=====================================================================
+subject "a sitting red fox", 16x16, palette gameboy
+prompt sha: system ccf1b256ea704c6e / user f19b79662923487a
+
+------------------------------------------------------------------------------
+1. FIXED SEED, temperature 0 — the same draft twice
+------------------------------------------------------------------------------
+
+── seed 1234, temperature 0
+   options sent: {"temperature":0,"seed":1234}
+   run A: 310 bytes, sha256 e876ddcb1527d206  (15687 ms)
+   run B: 310 bytes, sha256 e876ddcb1527d206  (5896 ms)
+   IDENTICAL: YES
+
+  (run A paid the 15.7 s cold load; run B was warm at 5.9 s. Wall time is not
+  reproducible and never will be — the OUTPUT is.)
+
+------------------------------------------------------------------------------
+2. CHANGE ONLY THE SEED, temperature still 0
+------------------------------------------------------------------------------
+
+── seed 9876, temperature 0
+   options sent: {"temperature":0,"seed":9876}
+   run A: 310 bytes, sha256 e876ddcb1527d206  (5421 ms)
+   run B: 310 bytes, sha256 e876ddcb1527d206  (4888 ms)
+   IDENTICAL: YES
+
+   seed 1234 vs seed 9876 at temperature 0 — DIFFER: NO
+
+  THE NEGATIVE RESULT. Greedy decoding takes the argmax and never draws from
+  the RNG, so the seed is inert at temperature 0 — the same 310 bytes, the
+  same hash, under two different seeds. Section 3 is where the seed can be
+  seen doing anything at all.
+
+------------------------------------------------------------------------------
+3. TEMPERATURE 1 — where the seed can actually be observed
+------------------------------------------------------------------------------
+
+── seed 1234, temperature 1
+   options sent: {"temperature":1,"seed":1234}
+   run A: 311 bytes, sha256 7463a58b609bdc2a  (5110 ms)
+   run B: 311 bytes, sha256 7463a58b609bdc2a  (5088 ms)
+   IDENTICAL: YES
+
+── seed 9876, temperature 1
+   options sent: {"temperature":1,"seed":9876}
+   run A: 365 bytes, sha256 057d2d5ab4858bf2  (6531 ms)
+   run B: 365 bytes, sha256 057d2d5ab4858bf2  (6295 ms)
+   IDENTICAL: YES
+
+   seed 1234 vs seed 9876 at temperature 1 — DIFFER: YES
+
+  Both halves of the claim, at the temperature where the claim is testable:
+  the same seed reproduces byte for byte, and a different seed produces a
+  different draft. This is the pair that proves the seed reaches the sampler.
+
+------------------------------------------------------------------------------
+4. CONTROL — no seed at all (the SHIPPED default), temperature 1
+------------------------------------------------------------------------------
+
+── seed null (key omitted), temperature 1
+   options sent: {"temperature":1}
+   run A: 310 bytes, sha256 561a800ccf8b9555  (5504 ms)
+   run B: 312 bytes, sha256 716041ebb6284369  (6319 ms)
+   IDENTICAL: NO
+
+  THE CONTROL, and it is what makes section 3 mean anything. With the seed key
+  ABSENT — not `null`, absent — two identical calls diverge. So the identity
+  in section 3 is caused by the seed and not by the model being deterministic
+  regardless. It also confirms the shipped default still gives a user a
+  different fox each time, which is the whole reason `seed: null` stays the
+  default.
+
+------------------------------------------------------------------------------
+5. THE WHOLE DRAFT STAGE, end to end — draft() twice, seed 1234, temp 0
+------------------------------------------------------------------------------
+
+   run A: 16 rows, sha256 deb4cfe8423ae719, subject "a sitting red fox"
+   run B: 16 rows, sha256 deb4cfe8423ae719, subject "a sitting red fox"
+   SPRITE IDENTICAL: YES
+
+   run A sprite:                  run B sprite:
+     ................               ................
+     ................               ................
+     ....3......3....               ....3......3....
+     ...333.22.333...               ...333.22.333...
+     ....32222223....               ....32222223....
+     ....22222222....               ....22222222....
+     ...2202222022...               ...2202222022...
+     ....22022022....               ....22022022....
+     ....22200222....               ....22200222....
+     .....222222.....               .....222222.....
+     .....222222.....               .....222222.....
+     .....222222.....               .....222222.....
+     .....222222.....               .....222222.....
+     ................               ................
+     ................               ................
+     ................               ................
+
+  Not one raw call — the whole A11 gauge loop, including however many batches
+  it chose to spend and the ops interpreter that renders them. The sprite is
+  identical, so nothing downstream of the model call reintroduces variance.
+
+
+PART 2 — the two questions a bench actually depends on
+=======================================================
+
+------------------------------------------------------------------------------
+6. DOES DETERMINISM SURVIVE A MODEL RELOAD?
+   A bench runs for hours; Ollama evicts an idle model after five minutes. If
+   the seed only held within one load, a long bench would be back to comparing
+   runs it cannot attribute.
+------------------------------------------------------------------------------
+   warm (model already loaded):  310 bytes, sha256 e876ddcb1527d206
+   loaded before eviction:       ["qwen3-vl:8b-instruct-q4_K_M"]
+   loaded after eviction:        []
+   cold (model reloaded):        310 bytes, sha256 e876ddcb1527d206
+   IDENTICAL ACROSS RELOAD: YES
+
+  The same hash the warm run produced — and the same hash section 1 produced
+  in a DIFFERENT PROCESS two minutes earlier. Determinism here is a property
+  of (model, prompt, options), not of a particular load or a particular
+  client process.
+
+------------------------------------------------------------------------------
+7. DOES ONE SEED COLLAPSE DISTINCT PROMPTS ONTO ONE ANOTHER?
+   A13 says no, and that claim is the entire justification for one seed per
+   run rather than a seed derived per call.
+------------------------------------------------------------------------------
+   "a sitting red fox"        sha256 e876ddcb1527d206
+   "a wooden treasure chest"  sha256 4664216fda43e5ee
+   "a knight's steel sword"   sha256 d40a4d3f9e0a9c23
+   DISTINCT OUTPUTS UNDER ONE SEED: 3 of 3
+
+  A13's claim confirmed. One seed per run is sufficient; per-call derivation
+  would be complexity buying nothing.
+
+
+WHAT THIS MEANS FOR §13's BENCH
+================================
+  - A seeded run IS reproducible on this hardware. Repeated trials are not
+    required to control for model non-determinism. That was the open question
+    and the answer is yes.
+  - Set `temperature` deliberately. At 0 the seed is inert and every run is
+    the single greedy answer — good for "did this config change alter the
+    outcome", useless for "how much does this subject vary".
+  - To measure variance, hold `temperature` above 0 and sweep the seed. That
+    is the only axis on which this pipeline now produces controlled variance.
+  - Wall-clock timings are NOT reproducible (15687 ms vs 5896 ms for the same
+    bytes, purely cold vs warm load). Any timing comparison must load the
+    model first or report cold and warm separately.
+  - The pending question — whether the revise stage should get shape
+    operations — is now measurable. `2026-07-30-shape-dsl-benchmark.txt`'s
+    revise comparison was n=1 against unquantified variance and should be
+    re-run seeded before it is believed.
+
+REPRODUCE
+=========
+  Probe sources (scratchpad, not committed):
+    determinism.ts   — sections 1-5
+    determinism2.ts  — sections 6-7
+  Both import src/main/{ollama,draft}.ts and src/shared/schema.ts by absolute
+  path, bundle with `node_modules/.bin/esbuild --bundle --platform=node
+  --format=esm --packages=external`, and run under node v22.15.0. Nothing in
+  them constructs an options bag by hand — every call goes through
+  `modelOptions(cfg)`, so this capture is evidence about the shipped code
+  path and not about a probe that happens to resemble it.
