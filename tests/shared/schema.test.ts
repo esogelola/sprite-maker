@@ -4,8 +4,11 @@ import { charIndex } from "@shared/grid";
 import {
   CritiqueReportSchema,
   DEFAULT_HARNESS_CONFIG,
+  DRAW_OP_NAMES,
   DraftFailureSchema,
+  DrawOpSchema,
   HarnessConfigSchema,
+  OP_COORD_LIMIT,
   IssueSchema,
   LintReportSchema,
   LintWarningSchema,
@@ -831,6 +834,115 @@ describe("LintReportSchema", () => {
 });
 
 // ---------------------------------------------------------------------------
+// DrawOpSchema — spec §6.2a, amendment A10
+// ---------------------------------------------------------------------------
+
+describe("DrawOpSchema", () => {
+  it("accepts one instance of each of the five ops §6.2a lists", () => {
+    const ops: unknown[] = [
+      { op: "ellipse", cx: 8, cy: 6, rx: 4, ry: 3, index: "4" },
+      { op: "fill_rect", x0: 5, y0: 9, x1: 10, y1: 13, index: "4" },
+      { op: "line", x0: 3, y0: 2, x1: 6, y1: 5, index: "0" },
+      { op: "mirror_x", axis: 8 },
+      { op: "clear", x0: 0, y0: 0, x1: 3, y1: 3 },
+    ];
+    for (const op of ops) expect(DrawOpSchema.safeParse(op).success).toBe(true);
+    expect(ops).toHaveLength(DRAW_OP_NAMES.length);
+  });
+
+  it("names exactly the five ops, in the order §6.2a lists them", () => {
+    expect(DRAW_OP_NAMES).toEqual(["ellipse", "fill_rect", "line", "mirror_x", "clear"]);
+  });
+
+  it("takes `index` as a row CHARACTER, not a number", () => {
+    // The model is shown the palette as `0 = #0f380f`, so `"0"` is the
+    // vocabulary it already has. Two spellings of one idea is how `"0"` — black,
+    // the commonest outline colour — ends up dropped by a falsy check.
+    expect(DrawOpSchema.safeParse({ op: "mirror_x", axis: 8 }).success).toBe(true);
+    expect(
+      DrawOpSchema.safeParse({ op: "line", x0: 0, y0: 0, x1: 1, y1: 1, index: 0 }).success,
+    ).toBe(false);
+    expect(
+      DrawOpSchema.safeParse({ op: "line", x0: 0, y0: 0, x1: 1, y1: 1, index: "0" }).success,
+    ).toBe(true);
+  });
+
+  it("accepts '.' as an index and rejects uppercase and off-encoding characters", () => {
+    const withIndex = (index: unknown) => ({ op: "fill_rect", x0: 0, y0: 0, x1: 1, y1: 1, index });
+    expect(DrawOpSchema.safeParse(withIndex(".")).success).toBe(true);
+    expect(DrawOpSchema.safeParse(withIndex("f")).success).toBe(true);
+    expect(DrawOpSchema.safeParse(withIndex("F")).success).toBe(false);
+    expect(DrawOpSchema.safeParse(withIndex("g")).success).toBe(false);
+    expect(DrawOpSchema.safeParse(withIndex("11")).success).toBe(false);
+  });
+
+  it("admits a coordinate outside the canvas — applyOp clamps, §6.2a", () => {
+    // `cx: 20` on a 16-wide canvas meant "near the right edge". Rejecting it in
+    // the contract layer would make the clamp unreachable.
+    expect(
+      DrawOpSchema.safeParse({ op: "ellipse", cx: 20, cy: 8, rx: 8, ry: 4, index: "1" }).success,
+    ).toBe(true);
+    expect(
+      DrawOpSchema.safeParse({ op: "fill_rect", x0: -9, y0: -9, x1: 4, y1: 4, index: "1" }).success,
+    ).toBe(true);
+  });
+
+  it("bounds coordinates at OP_COORD_LIMIT so `line` cannot loop unboundedly", () => {
+    const line = (x1: number) => ({ op: "line", x0: 0, y0: 0, x1, y1: 0, index: "1" });
+    expect(DrawOpSchema.safeParse(line(OP_COORD_LIMIT)).success).toBe(true);
+    expect(DrawOpSchema.safeParse(line(OP_COORD_LIMIT + 1)).success).toBe(false);
+    expect(DrawOpSchema.safeParse(line(-OP_COORD_LIMIT - 1)).success).toBe(false);
+    expect(OP_COORD_LIMIT).toBeGreaterThanOrEqual(64 * 8); // 8x the largest canvas
+  });
+
+  it("accepts a radius of 0 — a single pixel, which is how an eye is drawn", () => {
+    // The zero case. `positive()` here erases every small detail in the sprite.
+    expect(
+      DrawOpSchema.safeParse({ op: "ellipse", cx: 4, cy: 4, rx: 0, ry: 0, index: "1" }).success,
+    ).toBe(true);
+    expect(
+      DrawOpSchema.safeParse({ op: "ellipse", cx: 4, cy: 4, rx: -1, ry: 1, index: "1" }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a non-integer coordinate", () => {
+    expect(
+      DrawOpSchema.safeParse({ op: "line", x0: 0.5, y0: 0, x1: 1, y1: 1, index: "1" }).success,
+    ).toBe(false);
+  });
+
+  it("gives mirror_x and clear no index — neither may be asked to paint", () => {
+    expect(DrawOpSchema.safeParse({ op: "mirror_x", axis: 8, index: "1" }).success).toBe(false);
+    expect(
+      DrawOpSchema.safeParse({ op: "clear", x0: 0, y0: 0, x1: 1, y1: 1, index: "0" }).success,
+    ).toBe(false);
+  });
+
+  it("is strict — a stray key is a model that invented a parameter", () => {
+    expect(
+      DrawOpSchema.safeParse({ op: "ellipse", cx: 4, cy: 4, rx: 2, ry: 2, index: "1", fill: true })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects an op with a missing field rather than defaulting it", () => {
+    expect(DrawOpSchema.safeParse({ op: "ellipse", cx: 4, cy: 4, rx: 2, index: "1" }).success).toBe(
+      false,
+    );
+    expect(DrawOpSchema.safeParse({ op: "mirror_x" }).success).toBe(false);
+  });
+
+  it("rejects an unknown op name", () => {
+    expect(DrawOpSchema.safeParse({ op: "flood_fill", x0: 0, y0: 0, index: "1" }).success).toBe(
+      false,
+    );
+    expect(DrawOpSchema.safeParse({ op: "place_pixel", x: 0, y: 0, index: "1" }).success).toBe(
+      false,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // HarnessConfigSchema — spec §6.8
 // ---------------------------------------------------------------------------
 
@@ -850,6 +962,9 @@ describe("HarnessConfigSchema", () => {
       stopOnNoHighSeverity: true,
       criticTargetPx: 512,
       callTimeoutMs: 120000,
+      callTimeoutFloorMs: 45000,
+      maxDraftBatches: 5,
+      draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
       models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
     });
   });
@@ -956,6 +1071,69 @@ describe("HarnessConfigSchema", () => {
     expect(
       HarnessConfigSchema.safeParse({ ...DEFAULT_HARNESS_CONFIG, criticUpscale: 16 })
         .success,
+    ).toBe(false);
+  });
+
+  // -- A11 / A12: the gauge loop's own limits ------------------------------
+
+  it("defaults maxDraftBatches to 5 and callTimeoutFloorMs to 45000", () => {
+    const cfg = HarnessConfigSchema.parse({});
+    expect(cfg.maxDraftBatches).toBe(5);
+    expect(cfg.callTimeoutFloorMs).toBe(45000);
+  });
+
+  it("defaults draftGaugeBar to the four §6.2b figures", () => {
+    expect(HarnessConfigSchema.parse({}).draftGaugeBar).toEqual({
+      minColours: 3,
+      minCoverage: 0.12,
+      maxCoverage: 0.8,
+      minDistinctRows: 8,
+    });
+  });
+
+  it("floors the 16x16 deadline above pure area scaling — A12", () => {
+    // The measured failure: `120000 × 256/1024 = 30s`, which a revise turn
+    // exceeds, so every 16x16 run ended FAILED after round 1. The floor is what
+    // makes the smallest canvas no longer the tightest deadline.
+    const cfg = HarnessConfigSchema.parse({});
+    const scaled = (cfg.callTimeoutMs * 16 * 16) / (32 * 32);
+    expect(scaled).toBe(30000);
+    expect(cfg.callTimeoutFloorMs).toBeGreaterThan(scaled);
+  });
+
+  it("fills a partial draftGaugeBar rather than dropping the other three", () => {
+    const cfg = HarnessConfigSchema.parse({ draftGaugeBar: { minColours: 2 } });
+    expect(cfg.draftGaugeBar).toEqual({
+      minColours: 2,
+      minCoverage: 0.12,
+      maxCoverage: 0.8,
+      minDistinctRows: 8,
+    });
+  });
+
+  it("rejects an unknown key inside draftGaugeBar — the staleness argument again", () => {
+    expect(
+      HarnessConfigSchema.safeParse({ draftGaugeBar: { minColors: 3 } }).success,
+    ).toBe(false);
+  });
+
+  it.each([0, -1, 2.5])("rejects maxDraftBatches = %s", (v) => {
+    expect(HarnessConfigSchema.safeParse({ maxDraftBatches: v }).success).toBe(false);
+  });
+
+  it.each([0, -1, 1.5])("rejects callTimeoutFloorMs = %s", (v) => {
+    expect(HarnessConfigSchema.safeParse({ callTimeoutFloorMs: v }).success).toBe(false);
+  });
+
+  it("rejects a coverage bound outside 0..1 and a non-integer colour count", () => {
+    expect(
+      HarnessConfigSchema.safeParse({ draftGaugeBar: { minCoverage: 1.5 } }).success,
+    ).toBe(false);
+    expect(
+      HarnessConfigSchema.safeParse({ draftGaugeBar: { minColours: 2.5 } }).success,
+    ).toBe(false);
+    expect(
+      HarnessConfigSchema.safeParse({ draftGaugeBar: { minDistinctRows: 0 } }).success,
     ).toBe(false);
   });
 

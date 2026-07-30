@@ -9,7 +9,7 @@
  * PNG without the edits **and without an error** — the defect §8 now names
  * explicitly.
  *
- * Four rules govern this file:
+ * Six rules govern this file:
  *
  * **1. Errors cross as a `Result` envelope, never as a rejection** (§9).
  * `ipcMain.handle` serializes a rejection into a plain `Error` and destroys the
@@ -32,6 +32,26 @@
  * place would invalidate every later round's `diffFromPrev`, and the filmstrip
  * is *defined* as replaying those diffs.
  *
+ * **5. One mutation at a time, and a refusal is never dressed as a success.**
+ * `currentSession` is a read-modify-write across an `await`, and §12 measures a
+ * run in minutes — so `accept` during an in-flight `run` used to return
+ * `{ok: true, acceptedRound: 1}` and then have the resolving run overwrite it
+ * with `acceptedRound: null`. The user's Accept was gone and they had been told
+ * it worked, which is audit blocker B12 — §8's "hand-editing then exporting
+ * produced a PNG without the edits **and without an error**" — arriving through
+ * concurrency instead of renderer state. `App.tsx`'s `busy` flag cannot fix it:
+ * it is renderer state, and rule 0 of this whole file is that the renderer is not
+ * an authority. Every session-mutating handler therefore goes through
+ * `exclusive`, and a second one answers `{ok: false, code: "busy"}`.
+ *
+ * **6. `currentSession` is live for the duration of a run**, not written once at
+ * the end. It used to be assigned only after `run()` resolved, so for a run's
+ * entire multi-minute duration every round-indexed method answered `no-session`
+ * while rounds were already on screen via `onEvent` and already on disk via
+ * `persist` — Wave 10's own boot capture recorded `getSessionPath` returning the
+ * session *directory* for exactly this reason. The `persist` callback below
+ * therefore adopts each history as it is written.
+ *
  * `pipeline.ts` stays Electron-free: `persist` is handed in as a callback that
  * closes over `saveHistory` and a directory this module receives, rather than
  * `pipeline.ts` reaching for `app.getPath`.
@@ -41,6 +61,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import { ipcMain } from "electron";
+import { ZodError } from "zod";
 
 import { appendRound, roundAt, saveHistory } from "@main/history";
 import { lint } from "@main/lint";
@@ -50,7 +71,7 @@ import {
   OllamaUnreachableError,
   type OllamaClient,
 } from "@main/ollama";
-import { createModelRegistry, type ModelRole } from "@main/models";
+import { MODEL_ROLES, createModelRegistry, type ModelRole } from "@main/models";
 import { accept, applyFeedback, run, type PipelineDeps, type PipelineInput } from "@main/pipeline";
 import { GridError, diff, setPixel as setGridPixel } from "@shared/grid";
 import { listPalettes } from "@shared/palettes";
@@ -149,6 +170,58 @@ export interface IpcDeps {
  */
 let currentSession: SessionHistory | null = null;
 
+/**
+ * The name of the mutation currently in flight, or `null` — rule 5.
+ *
+ * A string rather than a boolean so the refusal can name what it is waiting on:
+ * §12 puts a run at several minutes, and "busy" alone is not something a status
+ * bar can explain. Compared against `null` explicitly, never for truthiness —
+ * this file's rule 3 about falsy `0` is a habit, not a special case.
+ */
+let inFlight: string | null = null;
+
+/**
+ * Bumped by every `registerIpc`.
+ *
+ * A registration is what starting a main process means, so anything still in
+ * flight from a previous one belongs to a session this process no longer has.
+ * Without the token such a straggler would resolve later and write its history
+ * into the new `currentSession`, or clear a lock it does not hold — the same
+ * class of write race rule 5 exists to close, one level up.
+ */
+let generation = 0;
+
+/**
+ * Hold the session for the duration of `body` — rule 5.
+ *
+ * The check-and-set is deliberately synchronous, before any `await`: an IPC
+ * handler is invoked synchronously by `ipcMain`, so a second call that arrives
+ * while the first is suspended sees the flag only if it was set in the first
+ * call's synchronous prologue.
+ *
+ * There is no queue. A queued Accept would run against a session it was never
+ * shown — the user chose round 1 of what was on screen, and by the time the run
+ * resolves there may be three rounds and a different last one. Refusing tells
+ * the truth; queueing guesses.
+ */
+async function exclusive<T>(caller: string, body: () => Promise<T>): Promise<T> {
+  if (inFlight !== null) {
+    throw new IpcError(
+      "busy",
+      `${caller}: ${inFlight} is still in flight — one session mutation at a time`,
+    );
+  }
+  const gen = generation;
+  inFlight = caller;
+  try {
+    return await body();
+  } finally {
+    // Not `inFlight = null` unconditionally: a straggler from a superseded
+    // registration must not clear the lock the current one is holding.
+    if (gen === generation) inFlight = null;
+  }
+}
+
 function requireSession(caller: string): SessionHistory {
   if (currentSession === null) {
     throw new IpcError(
@@ -181,6 +254,15 @@ class IpcError extends Error {
  * The renderer branches on this — §8 disables Generate on
  * `ollama-unreachable` — so it must not be the error's class name, which a
  * refactor renames.
+ *
+ * **There is deliberately no `RangeError → "bad-index"` rule.** `roundAt` and
+ * `models.bind` both throw `RangeError`, so that one line reported an unknown
+ * model role, an empty model name and a genuinely bad round index with the same
+ * code — three unrelated causes the renderer cannot tell apart, on the field §8
+ * says it branches on. Each cause is now classified where it is raised
+ * (`requireRound`, `parseRole`, `parseModelName`), and an unclassified
+ * `RangeError` falls through to `"error"` rather than borrowing a code that is
+ * about something else.
  */
 function errorCode(error: unknown): string {
   if (error instanceof IpcError) return error.code;
@@ -190,8 +272,31 @@ function errorCode(error: unknown): string {
   // `out-of-bounds` / `off-palette` / `bad-char` — already the vocabulary the
   // revise loop branches on, so the renderer gets the same three.
   if (error instanceof GridError) return error.code;
-  if (error instanceof RangeError) return "bad-index";
+  // A schema rejection is a bad argument, which is what `bad-input` already
+  // means for the hand-written checks one section down.
+  if (error instanceof ZodError) return "bad-input";
   return "error";
+}
+
+/**
+ * The human half of the envelope — the string §8 puts in the status bar.
+ *
+ * A `ZodError`'s own `message` is `JSON.stringify(issues)`: a multi-hundred
+ * character array of `{code, path, expected, received}` objects, which is
+ * unrenderable in a one-line status bar and tells the user nothing they can act
+ * on. Flattened here to `path: message` pairs, at the boundary, so every schema
+ * in the system gets it without each one restating its own errors.
+ */
+function errorMessage(error: unknown): string {
+  if (error instanceof ZodError) {
+    return error.issues
+      .map((issue) => {
+        const path = issue.path.length > 0 ? issue.path.join(".") : "(root)";
+        return `${path}: ${issue.message}`;
+      })
+      .join("; ");
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -213,7 +318,7 @@ function failure(error: unknown): Extract<Result<never>, { ok: false }> {
   const base = {
     ok: false as const,
     code: errorCode(error),
-    message: error instanceof Error ? error.message : String(error),
+    message: errorMessage(error),
   };
   const endpoint = errorEndpoint(error);
   return endpoint === undefined ? base : { ...base, endpoint };
@@ -270,6 +375,67 @@ function parseChar(raw: unknown): string {
     throw new IpcError(
       "bad-char",
       `setPixel: expected a single character, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * `roundAt`, with its `RangeError` carrying a code the renderer can branch on.
+ *
+ * Rule 3: `Number.isInteger`, never truthiness — `roundIndex: 0` is the first
+ * round and the most common accept target. Called at the top of every
+ * round-indexed handler so a bad index costs no inference, and so the code says
+ * `bad-index` rather than whatever the *next* `RangeError` in the stack happens
+ * to be about.
+ */
+function requireRound(
+  session: SessionHistory,
+  index: unknown,
+  caller: string,
+): { index: number; round: Round } {
+  if (typeof index !== "number" || !Number.isInteger(index)) {
+    throw new IpcError(
+      "bad-index",
+      `${caller}: roundIndex must be a whole number, got ${JSON.stringify(index)}`,
+    );
+  }
+  try {
+    // The narrowed index is handed back rather than recovered by the caller with
+    // a cast, and never derived from `Round.round` — that is the 1-based *round
+    // number*, and re-deriving a position from it would quietly depend on an
+    // invariant `pipeline.ts` documents but nothing here enforces.
+    return { index, round: roundAt(session, index, caller) };
+  } catch (error) {
+    throw new IpcError("bad-index", errorMessage(error));
+  }
+}
+
+/**
+ * One of §6.8's two roles, or a `bad-role` failure.
+ *
+ * Checked here as well as inside `registry.bind` — which is right to keep its own
+ * guard — because only this layer knows what the renderer needs to hear. `bind`
+ * throws a `RangeError`, and a `RangeError` is also what a bad round index
+ * throws, so the two arrived at the renderer indistinguishable.
+ */
+function parseRole(raw: unknown): ModelRole {
+  if (typeof raw !== "string" || !(MODEL_ROLES as readonly string[]).includes(raw)) {
+    throw new IpcError(
+      "bad-role",
+      `bindModel: unknown model role ${JSON.stringify(raw)} — expected one of ` +
+        `${MODEL_ROLES.map((role) => `'${role}'`).join(", ")}`,
+    );
+  }
+  return raw as ModelRole;
+}
+
+/** A non-empty model name, or a `bad-model` failure. Whitespace 404s at Ollama. */
+function parseModelName(raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new IpcError(
+      "bad-model",
+      `bindModel: model must be a non-empty name, got ${JSON.stringify(raw)}`,
     );
   }
   return raw;
@@ -332,8 +498,39 @@ function replaceRound(session: SessionHistory, index: number, rows: string[]): R
 
   const rounds = session.rounds.slice();
   rounds[index] = updated;
-  currentSession = { ...session, rounds };
+  currentSession = releaseAcceptance({ ...session, rounds }, existing.round);
   return updated;
+}
+
+/**
+ * A hand edit to the accepted round's own document clears the acceptance.
+ *
+ * The choice was between refusing the edit and clearing the acceptance, and it is
+ * settled by Wave 14's gate script, which runs Accept (feature 10) *before* hand
+ * editing (11) and PNG export (12) — where feature 12 is explicitly "including
+ * hand edits from #11". Refusing would make the ratified gate unrunnable and
+ * leave a session with no way back to editing, since there is no un-accept.
+ *
+ * Clearing is also the only honest record: §11's first bar and Wave 14's feature
+ * 10 read `acceptedRound` off the artifact, and after this edit that number would
+ * name a document the user has since repainted. `finalState` returns to exactly
+ * what `accept` replaced — `finish()` leaves a completed run at `AWAITING_USER`
+ * and `fail()` leaves a failed one at `FAILED` — so a failed run is not laundered
+ * into one that reached the gate. `outcome`, `stopReason` and `error` are
+ * untouched: they describe the *run*, which this edit did not change.
+ *
+ * **Only when the accepted document itself changed.** Editing an earlier round
+ * appends a new one and leaves the accepted round exactly as accepted, so
+ * `acceptedRound` is still a true statement about the artifact and nulling it
+ * would destroy a measurement §11 depends on.
+ */
+function releaseAcceptance(session: SessionHistory, editedRound: number): SessionHistory {
+  if (session.acceptedRound === null || session.acceptedRound !== editedRound) return session;
+  return {
+    ...session,
+    acceptedRound: null,
+    finalState: session.outcome === "completed" ? "AWAITING_USER" : "FAILED",
+  };
 }
 
 /**
@@ -406,6 +603,8 @@ function appendEditedRound(
  */
 export function registerIpc(deps: IpcDeps): void {
   currentSession = null;
+  inFlight = null;
+  const gen = ++generation;
 
   const registry = createModelRegistry(deps.client, deps.config);
 
@@ -423,6 +622,10 @@ export function registerIpc(deps: IpcDeps): void {
     // a crash. `pipeline.ts` guards every call, so a full disk is recorded on
     // `SessionHistory.error` rather than failing a run that succeeded.
     persist: async (history) => {
+      // Rule 6. Adopted *before* the write, not after: `getSessionPath` and every
+      // round-indexed method should answer about the round the user is already
+      // looking at, and whether the disk accepted it is a separate question.
+      if (gen === generation) currentSession = history;
       await saveHistory(history, deps.sessionDir);
     },
   };
@@ -440,9 +643,13 @@ export function registerIpc(deps: IpcDeps): void {
 
   ipcMain.handle(CHANNELS.bindModel, async (_event, role: unknown, model: unknown) =>
     envelope<void>(() => {
-      // `bind` validates the role at runtime for exactly this reason: the pickers
-      // reach it through IPC, where TypeScript's guarantee is already spent.
-      registry.bind(role as ModelRole, model as string);
+      // Validated at runtime for exactly this reason: the pickers reach it
+      // through IPC, where TypeScript's guarantee is already spent. Done here
+      // rather than left to `bind`'s own guard so the two failures carry
+      // different codes — `bind` throws `RangeError` for both, which is what made
+      // an unknown role and an empty name indistinguishable from a bad round
+      // index. `bind` keeps its guard; this one chooses the words.
+      registry.bind(parseRole(role), parseModelName(model));
     }),
   );
 
@@ -465,32 +672,39 @@ export function registerIpc(deps: IpcDeps): void {
    * `error` off the history. Only a bad config rejects, and that is `ok: false`.
    */
   ipcMain.handle(CHANNELS.run, async (_event, input: unknown) =>
-    envelope(async () => {
-      const history = await run(pipelineDeps, parseRunInput(input), deps.config);
-      currentSession = history;
-      return history;
-    }),
+    envelope(() =>
+      exclusive("run", async () => {
+        const history = await run(pipelineDeps, parseRunInput(input), deps.config);
+        // `persist` has been adopting each round as it landed (rule 6); this is
+        // the terminal write, and the only one that carries a `persist` failure
+        // recorded on `error`.
+        currentSession = history;
+        return history;
+      }),
+    ),
   );
 
   ipcMain.handle(
     CHANNELS.applyFeedback,
     async (_event, feedback: unknown, roundIndex: unknown) =>
-      envelope(async () => {
-        const session = requireSession("applyFeedback");
-        // Rule 3: `roundAt` rejects a non-integer or out-of-range index and
-        // accepts `0`. Called here as well as inside `applyFeedback` so a bad
-        // index costs no inference.
-        roundAt(session, roundIndex as number, "applyFeedback");
-        const history = await applyFeedback(
-          pipelineDeps,
-          session,
-          parseFeedback(feedback),
-          roundIndex as number,
-          deps.config,
-        );
-        currentSession = history;
-        return history;
-      }),
+      envelope(() =>
+        exclusive("applyFeedback", async () => {
+          const session = requireSession("applyFeedback");
+          // Rule 3: `requireRound` rejects a non-integer or out-of-range index
+          // and accepts `0`. Called here as well as inside `applyFeedback` so a
+          // bad index costs no inference and reports `bad-index`.
+          const { index } = requireRound(session, roundIndex, "applyFeedback");
+          const history = await applyFeedback(
+            pipelineDeps,
+            session,
+            parseFeedback(feedback),
+            index,
+            deps.config,
+          );
+          currentSession = history;
+          return history;
+        }),
+      ),
   );
 
   /**
@@ -502,43 +716,51 @@ export function registerIpc(deps: IpcDeps): void {
    * an accept that never reached disk would be invisible after a reload.
    */
   ipcMain.handle(CHANNELS.accept, async (_event, roundIndex: unknown) =>
-    envelope(async () => {
-      const session = requireSession("accept");
-      const history = await accept(session, roundIndex as number);
-      currentSession = history;
-      await persistQuietly(history, deps.sessionDir);
-      return history;
-    }),
+    envelope(() =>
+      exclusive("accept", async () => {
+        const session = requireSession("accept");
+        const { index } = requireRound(session, roundIndex, "accept");
+        const history = await accept(session, index);
+        currentSession = history;
+        // Rule 5's other half: the envelope below reports `ok` only after this
+        // write, so an `ok: true` accept is one a reload can still see.
+        await persistQuietly(history, deps.sessionDir);
+        return history;
+      }),
+    ),
   );
 
   ipcMain.handle(
     CHANNELS.setPixel,
     async (_event, roundIndex: unknown, x: unknown, y: unknown, ch: unknown) =>
-      envelope<{ doc: SpriteDoc; lint: LintReport }>(async () => {
-        const session = requireSession("setPixel");
-        const index = roundIndex as number;
-        const source = roundAt(session, index, "setPixel");
+      envelope<{ doc: SpriteDoc; lint: LintReport }>(() =>
+        exclusive("setPixel", async () => {
+          const session = requireSession("setPixel");
+          const { index, round: source } = requireRound(session, roundIndex, "setPixel");
 
-        // Every pixel mutation in the system routes through `shared/grid.ts`, so
-        // a mouse click hits the identical bounds and palette checks the agent's
-        // `place_pixel` does.
-        const rows = setGridPixel(
-          source.doc.rows,
-          parseCoord(x, "x"),
-          parseCoord(y, "y"),
-          parseChar(ch),
-          source.doc.palette.colors.length,
-        );
+          // Every pixel mutation in the system routes through `shared/grid.ts`,
+          // so a mouse click hits the identical bounds and palette checks the
+          // agent's `place_pixel` does.
+          const rows = setGridPixel(
+            source.doc.rows,
+            parseCoord(x, "x"),
+            parseCoord(y, "y"),
+            parseChar(ch),
+            source.doc.palette.colors.length,
+          );
 
-        // Rule 4.
-        const isLast = index === session.rounds.length - 1;
-        const round = isLast
-          ? replaceRound(session, index, rows)
-          : appendEditedRound(session, index, rows, deps.config);
+          // Rule 4.
+          const isLast = index === session.rounds.length - 1;
+          const round = isLast
+            ? replaceRound(session, index, rows)
+            : appendEditedRound(session, index, rows, deps.config);
 
-        if (currentSession !== null) await persistQuietly(currentSession, deps.sessionDir);
-        return { doc: round.doc, lint: round.lint };
-      }),
+          // §8's own sentence is about this line: an edit that does not reach the
+          // artifact is a PNG exported without the edits and without an error.
+          if (currentSession !== null) await persistQuietly(currentSession, deps.sessionDir);
+          return { doc: round.doc, lint: round.lint };
+        }),
+      ),
   );
 
   // Blocker 5: `src/main/export.ts` is a Wave 13 file, and Wave 10's own test

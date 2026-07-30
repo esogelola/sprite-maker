@@ -183,6 +183,89 @@ export const SpriteDocSchema = z
   });
 
 // ---------------------------------------------------------------------------
+// 6.2a DrawOp — the shape DSL, amendment A10
+// ---------------------------------------------------------------------------
+
+/**
+ * How far outside the canvas a coordinate is still taken as an arithmetic slip.
+ *
+ * §6.2a's ops are **clamped, not rejected**: `cx: 20` on a 16-wide canvas meant
+ * "near the right edge" and draws its visible part. But clamping is a statement
+ * about *near* misses. A bound is still needed for two reasons: `line` walks its
+ * endpoints one pixel at a time, so an unbounded `x1` is an unbounded loop; and
+ * a coordinate eight canvases away is not a slip, it is a model that lost the
+ * canvas, and dropping that one op is cheaper than drawing a smear.
+ *
+ * 512 is 8× the largest canvas §6.2 admits.
+ */
+export const OP_COORD_LIMIT = 512;
+
+/** A `DrawOp` coordinate. Signed and unbounded by the canvas — `applyOp` clamps. */
+const OpCoord = z.int().min(-OP_COORD_LIMIT).max(OP_COORD_LIMIT);
+
+/**
+ * An ellipse radius. Non-negative, and **0 is a legal radius**: it names the
+ * single pixel at the centre, which is how a model draws an eye.
+ */
+const OpRadius = z.int().nonnegative().max(OP_COORD_LIMIT);
+
+/**
+ * One shape operation — spec §6.2a, amendment A10.
+ *
+ * **`index` is a row character, not a number.** The model is shown the palette
+ * as `0 = #0f380f`, so `"0"` is the vocabulary it already has; asking for the
+ * integer `0` in the ops and the character `"0"` in the prompt would be two
+ * spellings of one idea, and `"0"` — black, the most common outline colour — is
+ * exactly the value a falsy-number check would drop.
+ *
+ * `mirror_x` and `clear` carry no `index`: one copies pixels and the other
+ * erases to transparent, and giving either a colour would invite a model to
+ * "clear to white".
+ *
+ * Every variant is strict. An op with a stray key is a model that invented a
+ * parameter, and silently dropping the key would draw something the op list
+ * does not describe — and the op list is the artifact §6.2a says a human reads.
+ */
+export const DrawOpSchema = z.discriminatedUnion("op", [
+  z.strictObject({
+    op: z.literal("ellipse"),
+    cx: OpCoord,
+    cy: OpCoord,
+    rx: OpRadius,
+    ry: OpRadius,
+    index: RowChar,
+  }),
+  z.strictObject({
+    op: z.literal("fill_rect"),
+    x0: OpCoord,
+    y0: OpCoord,
+    x1: OpCoord,
+    y1: OpCoord,
+    index: RowChar,
+  }),
+  z.strictObject({
+    op: z.literal("line"),
+    x0: OpCoord,
+    y0: OpCoord,
+    x1: OpCoord,
+    y1: OpCoord,
+    index: RowChar,
+  }),
+  /** `axis` is the first column of the right half: 8 mirrors x 0-7 onto x 8-15. */
+  z.strictObject({ op: z.literal("mirror_x"), axis: OpCoord }),
+  z.strictObject({
+    op: z.literal("clear"),
+    x0: OpCoord,
+    y0: OpCoord,
+    x1: OpCoord,
+    y1: OpCoord,
+  }),
+]);
+
+/** The five op names, in the order §6.2a lists them. */
+export const DRAW_OP_NAMES = ["ellipse", "fill_rect", "line", "mirror_x", "clear"] as const;
+
+// ---------------------------------------------------------------------------
 // 6.4 CritiqueReport
 // ---------------------------------------------------------------------------
 
@@ -335,6 +418,43 @@ export const HarnessConfigSchema = z.strictObject({
   criticTargetPx: z.int().positive().default(512),
   /** Scaled by canvas area at the call site: `× (w × h) / (32 × 32)` (§6.8). */
   callTimeoutMs: z.int().positive().default(120000),
+  /**
+   * The floor under the area-scaled timeout — spec §6.8, amendment A12.
+   *
+   * Pure area scaling made the *smallest* canvas the tightest deadline: a 16×16
+   * got `120000 × 256/1024 = 30s`, which a revise turn exceeds, so **every
+   * 16×16 run ended `FAILED` after round 1** — the app's first real generation.
+   * Cold-loading a 6-19 GB model costs 8-25 s no matter what is being drawn, and
+   * on the smallest canvas that was most of the budget.
+   */
+  callTimeoutFloorMs: z.int().positive().default(45000),
+  /**
+   * How many op batches one draft attempt may spend — spec §6.2b, amendment A11.
+   *
+   * The cap, not the target. **The harness owns the stop decision**: the loop
+   * exits the moment `draftGaugeBar` clears, so a first batch that clears costs
+   * one inference and only a weak draft pays for more. In the benchmark the
+   * model never once set `done: true` — it consumed every batch it was offered,
+   * and on the subject one shot already drew well, five batches produced a
+   * *simpler*, worse sprite.
+   */
+  maxDraftBatches: z.int().positive().default(5),
+  /**
+   * When the draft is finished — spec §6.2b, amendment A11.
+   *
+   * Measured against the failure the loop exists to catch: a model that commits
+   * to one fill and never notices it has made a monochrome mass. `minColours`
+   * and `minDistinctRows` are what a mass fails; `maxCoverage` is what a canvas
+   * flooded by a runaway `fill_rect` fails.
+   */
+  draftGaugeBar: z
+    .strictObject({
+      minColours: z.int().positive().default(3),
+      minCoverage: Unit.default(0.12),
+      maxCoverage: Unit.default(0.8),
+      minDistinctRows: z.int().positive().default(8),
+    })
+    .default({ minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 }),
   models: ModelsSchema,
 });
 
@@ -638,6 +758,9 @@ export interface ToolDef {
 
 export type Size = z.infer<typeof SizeSchema>;
 export type Intent = z.infer<typeof IntentSchema>;
+export type DrawOp = z.infer<typeof DrawOpSchema>;
+export type DrawOpName = (typeof DRAW_OP_NAMES)[number];
+export type DraftGaugeBar = HarnessConfig["draftGaugeBar"];
 export type PaletteRef = z.infer<typeof PaletteRefSchema>;
 export type SpriteDoc = z.infer<typeof SpriteDocSchema>;
 export type Issue = z.infer<typeof IssueSchema>;
@@ -670,5 +793,8 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   stopOnNoHighSeverity: true,
   criticTargetPx: 512,
   callTimeoutMs: 120000,
+  callTimeoutFloorMs: 45000,
+  maxDraftBatches: 5,
+  draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
   models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
 };

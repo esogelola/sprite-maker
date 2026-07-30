@@ -32,7 +32,9 @@
     "src/**/*.tsx",
     "tests/**/*.ts",
     "tests/**/*.tsx",
+    "e2e/**/*.ts",
     "vitest.config.ts",
-    "electron.vite.config.ts"
+    "electron.vite.config.ts",
+    "playwright.config.ts"
   ]
 }

@@ -1,0 +1,173 @@
+Wave 6b live draft — the shape DSL and the gauge loop, against a real model
+===========================================================================
+Date:   2026-07-30
+Model:  qwen3-vl:8b-instruct-q4_K_M (6 GB — the memory-constrained option)
+Host:   Apple M2 Max, 32 GB. Ollama 0.32.1.
+Code:   src/main/dsl.ts, src/main/draft.ts, src/main/prompts/draft.ts at Wave 6b
+Config: §6.8 defaults — maxDraftBatches 5, callTimeoutFloorMs 45000,
+        draftGaugeBar {minColours:3, minCoverage:0.12, maxCoverage:0.80,
+        minDistinctRows:8}
+
+HEADLINE: Both subjects cleared the gauge bar. The fox cleared on batch 1 and
+          cost ONE inference; the tree needed three. That asymmetry is the
+          whole of A11 — the harness stops as soon as it can, so only a weak
+          draft pays for more.
+
+Compare the app's first real generation (Wave 10): a 6-wide vertical bar of
+index 0, 30,005 ms, timed out.
+
+
+1. "a sitting red fox" — 16x16 pico-8 — 1 batch, 16.1 s
+--------------------------------------------------------
+Six operations, in the model's own order:
+
+  {"op":"ellipse","cx":7,"cy":7,"rx":4,"ry":3,"index":"2"}
+  {"op":"fill_rect","x0":5,"y0":10,"x1":9,"y1":13,"index":"4"}
+  {"op":"line","x0":6,"y0":8,"x1":6,"y1":11,"index":"0"}
+  {"op":"ellipse","cx":5,"cy":6,"rx":2,"ry":1,"index":"8"}
+  {"op":"mirror_x","axis":8}
+  {"op":"clear","x0":0,"y0":0,"x1":3,"y1":3}
+
+Rendered:
+
+  ................
+  ................
+  ................
+  ................
+  .......22.......
+  ....28222282....      ears, in 8 (#ff004d)
+  ...8888888888...
+  ...2282222822...
+  ....22022022....      eyes, in 0
+  ....22022022....
+  .....404404.....
+  .....404404.....      legs, in 4 (#ab5236)
+  .....444444.....
+  .....444444.....
+  ................
+  ................
+
+  coverage 0.273   colours 4   distinctRows 8/16   bbox [3,4,12,13]
+  clears bar TRUE  ->  the loop stopped. 1 model call, not 5.
+  meta.repairs 0, repairedRows []  ->  nothing was repaired, because there is
+  no width to get wrong on this path.
+
+Three things the prompt bought, all of them absent from every direct-emission
+run in the generator benchmark:
+  - mirror_x was used, unprompted beyond the HOW TO BUILD line. The sprite is
+    symmetric for free.
+  - The margin held: rows 0-3 and 14-15 are clear, columns 0-2 and 13-15 are
+    clear. Direct emission never respected margins.
+  - Four colours, when the instruction asked for at least three.
+
+
+2. "a green tree" — 16x16 pico-8 — 3 batches, 13.9 s
+-----------------------------------------------------
+This is the case A11 exists for. The DSL benchmark predicted it: "expected to
+help most on the tree case, where the model committed to a single fill and
+never noticed it had produced a monochrome blob."
+
+BATCH 1 (4.5 s, 5 ops) — the monochrome blob, exactly as predicted:
+
+  {"op":"ellipse","cx":8,"cy":6,"rx":3,"ry":5,"index":"3"}
+  {"op":"fill_rect","x0":7,"y0":10,"x1":9,"y1":14,"index":"3"}
+  {"op":"line","x0":7,"y0":6,"x1":8,"y1":7,"index":"0"}
+  {"op":"mirror_x","axis":8}
+  {"op":"clear","x0":0,"y0":15,"x1":15,"y1":15}
+
+  ................        coverage 0.180
+  ................        colours 2          <- under the bar
+  .......33.......        distinctRows 5     <- under the bar
+  ......3333......        clears = FALSE
+  ......3333......
+  .....333333.....
+  .....330033.....
+  .....333333.....
+  ......3333......
+  ......3333......
+  .......33.......
+  .......33.......
+  .......33.......
+  .......33.......
+  .......33.......
+  ................
+
+The harness then showed the model this canvas and these measurements —
+"1 colours used (use at least 3)", "5 distinct rows of 16" — and asked for the
+operations that close the gap.
+
+BATCH 2 (5.4 s, 4 ops) — broadens the crown, darkens the trunk:
+
+  {"op":"fill_rect","x0":5,"y0":2,"x1":10,"y1":4,"index":"3"}
+  {"op":"line","x0":5,"y0":4,"x1":10,"y1":4,"index":"0"}
+  {"op":"line","x0":6,"y0":3,"x1":9,"y1":3,"index":"0"}
+  {"op":"fill_rect","x0":7,"y0":12,"x1":8,"y1":14,"index":"0"}
+
+  ................        coverage 0.211
+  ................        colours 2          <- still under the bar
+  .....333333.....        distinctRows 8     <- now at the bar
+  .....300003.....        clears = FALSE
+  .....000000.....
+  .....333333.....
+  .....330033.....
+  .....333333.....
+  ......3333......
+  ......3333......
+  .......33.......
+  .......33.......
+  .......00.......
+  .......00.......
+  .......00.......
+  ................
+
+BATCH 3 (4.1 s, 3 ops) — a base, in two colours it had not used:
+
+  {"op":"fill_rect","x0":5,"y0":12,"x1":9,"y1":14,"index":"0"}
+  {"op":"line","x0":6,"y0":13,"x1":8,"y1":13,"index":"4"}
+  {"op":"ellipse","cx":7,"cy":11,"rx":2,"ry":1,"index":"5"}
+
+  ................        coverage 0.258
+  ................        colours 4          <- clear
+  .....333333.....        distinctRows 11    <- clear
+  .....300003.....        clears = TRUE  ->  the loop stopped at 3 of 5
+  .....000000.....
+  .....333333.....
+  .....330033.....
+  .....333333.....
+  ......3333......
+  ......3333......
+  .......53.......
+  .....55555......        a pot rim, index 5
+  .....00500......
+  .....04440......        index 4
+  .....00000......
+  ................
+
+  meta.repairs 0, repairedRows []
+  intent {"subject":"a green tree"}
+
+
+3. WHAT THIS MEASURES, AND WHAT IT DOES NOT
+--------------------------------------------
+Measured:
+  - The gauge loop exits on the FIRST batch that clears (fox: 1 call).
+  - It keeps going when the bar is not cleared, and the extra batches are
+    corrective rather than decorative (tree: 2 -> 4 colours, 5 -> 11 rows).
+  - A JSON Schema as `format` is accepted by Ollama 0.32.1 and constrains op
+    shape: `anyOf` over five `const`-tagged variants, `additionalProperties:
+    false`, and an `index` enum built from the palette in use. Every op in both
+    runs parsed; nothing was dropped.
+  - `meta.repairs` is 0 on both. §6.3's length repairs are unreachable here.
+  - Total wall clock 16.1 s and 13.9 s, against a 45 s per-call floor. The
+    floor is not the binding constraint at 16x16 — it exists so a COLD load
+    cannot consume a whole call, which is what killed Wave 10's 16x16 runs.
+
+Not measured:
+  - 32x32 and 64x64. The prompt scales its coordinates and mirror axis with
+    the canvas, and `draftTimeoutMs` scales past the floor at both, but no live
+    run has confirmed the model scales with it.
+  - Whether the sprites survive critique. That is Wave 7's question; this
+    capture only shows the generator now produces something worth critiquing,
+    which is what the generator benchmark said it did not.
+  - Variance. One run per subject. The three-subject, repeated-run comparison
+    belongs to Wave 13's bench.
