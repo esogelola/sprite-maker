@@ -1,0 +1,61 @@
+Do references help the generator? — first pass
+==============================================
+Date:   2026-07-30
+Model:  qwen3-vl:8b-instruct-q4_K_M, temperature 0.6, seeds 7/8/9
+Prompt: "a dog standing" (the subject the user watched fail)
+Why:    User observation — the generated sprites "lack an understanding of
+        structure and pixel style dog; references would probably be powerful
+        to these models". Two mechanisms were distinguished: reference as
+        TARGET (the deferred critic feature) and reference as EXEMPLAR (few-shot
+        craft for the generator). This tests the second.
+
+CONDITIONS
+  A  no reference (current shipped prompt)
+  B  + a hand-built 16x16 side-view dog as a TEXT GRID
+  C  + the same dog as an IMAGE via the vision channel, alongside the text
+
+  C is the lever nobody had pulled: the generator is a vision model and the
+  project had never once sent it a picture.
+
+RESULT
+                     symmetry           coverage        colours   distinctRows
+  reference           0.83               0.50              3           --
+  A no reference   0.83 / 0.38 / 0.00  0.76/0.19/0.50   1 / 1 / 2   7 / 10 / 2
+  B text ref       0.83 / 0.83 / 0.83  0.50/0.50/0.50   3 / 3 / 3   10 /10 /10
+  C image ref      0.69 / 0.83 / 0.83  0.64/0.50/0.50   3 / 3 / 3   8 /10 /10
+
+THE FINDING: B AND C COPIED THE REFERENCE VERBATIM.
+Every metric in B matches the hand-built reference exactly, and the raw grids
+are byte-identical to it. Two of three C seeds likewise. The model is not
+drawing in the reference's style; it is reproducing the example and relabelling
+it. This does not show that references teach an idiom.
+
+THREE THINGS IT DOES SHOW
+
+1. Condition A is worse than previously measured. One colour on two of three
+   seeds, symmetry 0.00 on the third, one seed producing only 2 distinct rows.
+   Without a reference the generator barely composes. "A dog standing" is a
+   harder subject than the fox used in earlier benchmarks, and the earlier
+   numbers flattered it.
+
+2. The image channel added nothing over text. C matched B and was slightly
+   worse on seed 7, at roughly double the latency (18.2s vs 9.1s on the first
+   call). This weakens the "we have a vision model and never send it images"
+   argument — at least for a same-subject exemplar.
+
+3. The experiment was too easy to answer the question. It supplied a dog and
+   asked for a dog, so copying satisfies the task. Verbatim reproduction is the
+   correct lazy answer, not evidence about style transfer.
+
+THE TEST THAT WOULD ACTUALLY ANSWER IT
+Show the dog reference, ask for a CAT or a HORSE. If the model produces a
+well-formed cat in the reference's idiom — outlined masses, 2-pixel ears with
+a gap, legs separated by single transparent columns — references work. If it
+produces the dog again, it is a copier and the mechanism is retrieval rather
+than craft.
+
+Small change to the same harness; not yet run.
+
+CONTACT SHEET
+screenshots/2026-07-30-reference-experiment.png — row 1 the reference, then
+A, B, C across three seeds each.
