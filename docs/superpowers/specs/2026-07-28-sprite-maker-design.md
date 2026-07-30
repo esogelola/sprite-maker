@@ -215,6 +215,20 @@ On rejection the draft is retried once, with the specific defects named back to 
 
 A second rejection produces `DraftRejectedError`, whose raw output is preserved in `SessionHistory.draftFailures` (§6.7).
 
+**Amendment A9 — `draft()` reports every rejected attempt, not just the last.** `draftFailures` is an array, but `DraftRejectedError` carries only the final attempt's `(repairs, raw)` — so as originally specified the pipeline could populate exactly one entry and attempt 1's raw output was lost. The array promised per-attempt history that nothing could supply.
+
+That loss matters for the one job the field has. Two rejected drafts with the *same* defect mean the prompt is wrong; two with *different* defects mean the model is unstable. Keeping only the second makes those indistinguishable, which is precisely the diagnosis `draftFailures` exists to enable.
+
+Resolved additively: `draft()`'s deps gain an optional reporter.
+
+```ts
+draft(deps: { client: OllamaClient; onAttempt?: (f: DraftFailure) => void }, input, cfg)
+```
+
+`onAttempt` fires once per **rejected** attempt (never on the accepted one), and the pipeline passes a collector whose output becomes `draftFailures`. `DraftRejectedError`'s signature is unchanged, so it stays the terminal signal rather than a data carrier.
+
+This also closes a second gap found alongside it: `draft()` previously had no progress hook at all, so a retry was invisible to the UI while `revise()` reported per-turn via `onTurn`. One reporter serves both — the pipeline emits a `state` event on each rejected attempt, and the status bar can say "retrying draft" instead of appearing to hang for a second full generation.
+
 ### 6.4 `CritiqueReport`
 
 ```ts

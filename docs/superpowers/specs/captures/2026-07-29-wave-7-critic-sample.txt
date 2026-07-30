@@ -1,0 +1,120 @@
+Wave 7 — one real qwen3-vl critique response
+============================================
+Date:   2026-07-29
+Model:  qwen3-vl:8b-instruct-q4_K_M  (id 0533d74300e4, 6.1 GB)
+Host:   Apple M2 Max, Ollama 0.32.1 at http://127.0.0.1:11434/api/generate
+Why:    Plan task 7.5. `tests/main/critique.test.ts` reads the verbatim
+        response at the bottom of this file and drives `parseCritique` and
+        `critique()` with it, so the suite goes red when a model or a prompt
+        change makes the critic emit a shape this stage cannot digest.
+
+REPRODUCTION
+------------
+Request body is exactly what `main/ollama.ts#vision` builds for `critique()`:
+
+  POST /api/generate
+  { model: "qwen3-vl:8b-instruct-q4_K_M",
+    system: <buildCritiquePrompt(doc, lint(doc)).system>,
+    prompt: <buildCritiquePrompt(doc, lint(doc)).user>,
+    images: [<toPng(doc, 16, pickCriticBackground(doc)) as base64>],
+    format: "json", think: false, stream: false }
+
+  doc        = BORDER_RING_32 from tests/fixtures/sprites.ts (32x32, test-struct)
+  scale      = max(1, floor(512 / 32)) = 16, so a 512x512 PNG
+  background = pickCriticBackground(doc) = #b5b5b5
+  temperature: unset (Ollama default) — this is a sample, not a benchmark
+
+TIMING
+------
+prompt_eval 2184 tokens / 5.5s, eval 494 tokens / 15.5s, total 21.4s.
+`thinking` was 0 characters with `think: false` — amendment A8 holds on the
+vision path too, which nothing had measured before this capture.
+
+WHAT THIS RESPONSE PROVES
+-------------------------
+1. REGIONS RUN OFF THE CANVAS, IN PRODUCTION, FROM A CORRECT-LOOKING MODEL.
+   Three of the four issues below name x1 or y1 = 32 on a 32x32 canvas, whose
+   last valid coordinate is 31. `Coord` is `z.int().nonnegative()` with no
+   upper bound, so these do not fail validation on the low side the way
+   spec 6.4's `[-5,-5,3,3]` example does — they fail nothing at all and would
+   have been handed to the revise stage as out-of-bounds edits. Clamping on
+   the raw JSON is what turns them into the four corner cells the model
+   plainly meant. This is the single strongest argument in the wave for
+   repairing before validating, and it came from the model unprompted.
+
+2. THE TWO-TIER CONFIDENCE CASE IS NOT HYPOTHETICAL. Every issue arrives at
+   `confidence: 0.95` with `suggestConfidence: 0.3` — spec 6.4's valuable
+   cell, verbatim: the problem is real, the fix is a guess. With the default
+   floors (0.30 / 0.50) `filterIssues` keeps all four issues and empties all
+   four `suggest` strings. A filter that dropped them would hand the revise
+   stage nothing at all on this sprite.
+
+3. `id` IS NOT UNIQUE. All four issues share the id
+   "inconsistent-edge-patterns". `IssueSchema` does not require uniqueness and
+   must not start to: a consumer keying a map on `id` would silently lose
+   three of these four findings.
+
+4. The critic obeyed "do not repeat the linter" — the four orphan pixels and
+   four outline gaps it was told about appear in none of the issue text — and
+   it answered in bare JSON with no markdown fence.
+
+A SECOND PROBE, FOR CONTRAST
+----------------------------
+The same request against SPRITE_32 (the clean pico-8 tree) returned, in full:
+
+  {"readsAs": "a tree with a round canopy and trunk", "matchesIntent": true,
+   "overall": 5, "issues": []}
+
+37 eval tokens, 20.7s. An empty `issues` array is a real answer from a real
+model, not a degenerate one — which is what makes spec 6.4's `degraded` flag
+load-bearing: `issues: []` from a critique that ran and `issues: []` from a
+critique that never parsed are otherwise the same document, and 7.2 would
+report `no-high-severity` for both.
+
+Everything after the sentinel line is `payload.response`, byte for byte.
+`tests/main/critique.test.ts` splits on that line; do not edit below it.
+
+----- BEGIN VERBATIM RESPONSE -----
+{
+  "readsAs": "a frame with colored blocks on edges",
+  "matchesIntent": true,
+  "overall": 3,
+  "issues": [
+    {
+      "id": "inconsistent-edge-patterns",
+      "region": [0, 0, 1, 1],
+      "severity": "high",
+      "issue": "the top-left corner has a red pixel but lacks corresponding structure on the adjacent edge segments for visual consistency.",
+      "suggest": "add matching colored blocks to adjacent edges to align with design intent or remove the outlier if it's unintentional.",
+      "confidence": 0.95,
+      "suggestConfidence": 0.3
+    },
+    {
+      "id": "inconsistent-edge-patterns",
+      "region": [31, 0, 32, 1],
+      "severity": "high",
+      "issue": "the top-right corner has a red pixel but lacks corresponding structure on the adjacent edge segments for visual consistency.",
+      "suggest": "add matching colored blocks to adjacent edges to align with design intent or remove the outlier if it's unintentional.",
+      "confidence": 0.95,
+      "suggestConfidence": 0.3
+    },
+    {
+      "id": "inconsistent-edge-patterns",
+      "region": [0, 31, 1, 32],
+      "severity": "high",
+      "issue": "the bottom-left corner has a red pixel but lacks corresponding structure on the adjacent edge segments for visual consistency.",
+      "suggest": "add matching colored blocks to adjacent edges to align with design intent or remove the outlier if it's unintentional.",
+      "confidence": 0.95,
+      "suggestConfidence": 0.3
+    },
+    {
+      "id": "inconsistent-edge-patterns",
+      "region": [31, 31, 32, 32],
+      "severity": "high",
+      "issue": "the bottom-right corner has a red pixel but lacks corresponding structure on the adjacent edge segments for visual consistency.",
+      "suggest": "add matching colored blocks to adjacent edges to align with design intent or remove the outlier if it's unintentional.",
+      "confidence": 0.95,
+      "suggestConfidence": 0.3
+    }
+  ]
+}
