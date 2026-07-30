@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Nothing in this app is fetched from the network — main/ollama.ts is the
+      sole HTTP boundary and it lives in the main process (spec §5.2). The policy
+      says so out loud, which is also what silences Electron's insecure-CSP
+      warning. `unsafe-inline` covers React's style attributes only; there is no
+      `unsafe-eval` and no remote origin.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Sprite Maker</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

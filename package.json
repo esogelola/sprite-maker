@@ -8,7 +8,12 @@
   "engines": {
     "node": ">=22.12"
   },
+  "main": "./out/main/index.mjs",
   "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "e2e": "playwright test",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live": "LIVE=1 vitest run tests/live --reporter=verbose",
@@ -21,6 +26,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@types/node": "^26.1.2",
     "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.17",

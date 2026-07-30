@@ -1,0 +1,27 @@
+Wave 10 — e2e/boot.spec.ts, live run against local Ollama
+captured: 2026-07-30T04:36:54.705Z
+cold boots attempted: 1 of 4
+webPreferences: {"contextIsolation":true,"nodeIntegration":false,"sandbox":true}
+window.api keys: accept, applyFeedback, bindModel, exportPng, getConfig, getModels, getPalettes, getSessionPath, listModels, onEvent, run, setPixel
+generator: qwen3:8b
+status bar at capture: REVISING · round 1 · turn 1 of 40 · 16×16 · pico-8
+session directory: /Users/sogemman/Library/Application Support/sprite-maker/sessions
+painted cells: 90 of 256
+palette indices used: 0
+
+................
+................
+................
+................
+................
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+....0000000000..
+................
+................
