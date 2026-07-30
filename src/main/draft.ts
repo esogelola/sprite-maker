@@ -48,6 +48,7 @@ import { TRANSPARENT, charIndex, indexChar, normalize, type Grid } from "@shared
 import { getPalette, type Palette } from "@shared/palettes";
 import {
   SpriteDocSchema,
+  type DraftFailure,
   type HarnessConfig,
   type Intent,
   type Size,
@@ -361,6 +362,41 @@ function buildDoc(
   return SpriteDocSchema.parse(doc);
 }
 
+export interface DraftDeps {
+  client: OllamaClient;
+  /**
+   * Fired once per **rejected** attempt, with the record §6.7 stores in
+   * `SessionHistory.draftFailures` — spec amendment A9.
+   *
+   * `DraftRejectedError` carries only the last attempt, so attempt 1's raw
+   * output was unrecoverable. Two rejections with the same defect mean the
+   * prompt is wrong; two with different defects mean the model is unstable —
+   * keeping only the second makes those indistinguishable, which is the whole
+   * diagnostic purpose of the field.
+   *
+   * It fires on a rejected attempt regardless of what happens next, so a run
+   * whose retry succeeded still records the attempt that did not: "how often
+   * does the retry save the run" is a question only that record can answer.
+   *
+   * Optional, so Wave 6's callers are unaffected.
+   */
+  onAttempt?: (failure: DraftFailure) => void;
+}
+
+/**
+ * The sentence `SessionHistory.draftFailures[].reason` carries.
+ *
+ * Names the ratio *and* both of its terms: `repairs` is unbounded (amendment
+ * A5), so "525%" is a real reading and a lone percentage would look like a bug.
+ */
+function rejectionReason(repairs: number, cells: number, threshold: number): string {
+  const pct = ((repairs / cells) * 100).toFixed(1);
+  return (
+    `${repairs} repaired cells of ${cells} (${pct}%) exceeded ` +
+    `repairRejectThreshold ${threshold}`
+  );
+}
+
 /**
  * Draft a sprite — spec §6.3's retry loop.
  *
@@ -373,7 +409,7 @@ function buildDoc(
  * doubles the wait before the status bar names the endpoint.
  */
 export async function draft(
-  deps: { client: OllamaClient },
+  deps: DraftDeps,
   input: { prompt: string; size: Size; paletteId: string },
   cfg: HarnessConfig,
 ): Promise<SpriteDoc> {
@@ -419,6 +455,16 @@ export async function draft(
     if (repairs / cells <= cfg.repairRejectThreshold) {
       return buildDoc(input, palette, parsed, cfg);
     }
+
+    // A9. Reported here rather than from the thrown error, because the error can
+    // only carry one attempt and this loop is the only place every attempt's raw
+    // output exists.
+    deps.onAttempt?.({
+      attempt,
+      raw,
+      repairs,
+      reason: rejectionReason(repairs, cells, cfg.repairRejectThreshold),
+    });
   }
 
   throw new DraftRejectedError(repairs, raw);

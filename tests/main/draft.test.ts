@@ -33,8 +33,10 @@ import { OllamaUnreachableError, type GenerateRequest, type OllamaClient } from 
 import { DRAFT_EXAMPLES } from "@main/prompts/draft";
 import { getPalette } from "@shared/palettes";
 import {
+  DraftFailureSchema,
   HarnessConfigSchema,
   SpriteDocSchema,
+  type DraftFailure,
   type HarnessConfig,
   type Size,
 } from "@shared/schema";
@@ -810,5 +812,92 @@ describe("draft", () => {
     );
     expect(doc.meta.repairs).toBe(48);
     expect(stub.calls).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // the attempt reporter — spec amendment A9
+  //
+  // `draftFailures` is an array, but `DraftRejectedError` carries only the last
+  // attempt, so attempt 1's raw output was unrecoverable. Two rejections with
+  // the same defect mean the prompt is wrong; two with different defects mean
+  // the model is unstable — one entry makes those indistinguishable.
+  // -------------------------------------------------------------------------
+
+  it("reports every rejected attempt through onAttempt, each with its own raw", async () => {
+    const first = reply(shorten(CLEAN_16, ALL_ROWS_16, 8));
+    const second = reply(shorten(CLEAN_16, ALL_ROWS_16, 12));
+    const stub = createStubClient({ generate: [first, second] });
+    const failures: DraftFailure[] = [];
+
+    await expect(
+      draft({ client: stub, onAttempt: (f) => failures.push(f) }, INPUT_16, cfg()),
+    ).rejects.toBeInstanceOf(DraftRejectedError);
+
+    expect(failures).toHaveLength(2);
+    expect(failures.map((f) => f.attempt)).toEqual([1, 2]);
+    expect(failures[0].raw).toBe(first);
+    expect(failures[1].raw).toBe(second);
+    expect(failures[0].repairs).toBe(16 * 8);
+    expect(failures[1].repairs).toBe(16 * 12);
+    for (const failure of failures) {
+      expect(() => DraftFailureSchema.parse(failure)).not.toThrow();
+      expect(failure.reason).toContain("repairRejectThreshold");
+    }
+  });
+
+  it("fires for a rejected attempt the retry then recovered from", async () => {
+    const stub = createStubClient({ generate: [OVER_THRESHOLD_16, reply(CLEAN_16)] });
+    const failures: DraftFailure[] = [];
+
+    const doc = await draft({ client: stub, onAttempt: (f) => failures.push(f) }, INPUT_16, cfg());
+
+    expect(doc.meta.repairs).toBe(0);
+    expect(failures).toHaveLength(1);
+    expect(failures[0].attempt).toBe(1);
+  });
+
+  it("does not fire for an accepted attempt", async () => {
+    const stub = createStubClient({ generate: [reply(CLEAN_16)] });
+    const failures: DraftFailure[] = [];
+
+    await draft({ client: stub, onAttempt: (f) => failures.push(f) }, INPUT_16, cfg());
+
+    expect(failures).toEqual([]);
+  });
+
+  it("does not fire on a transport failure — that is not a rejected draft", async () => {
+    const stub = createStubClient({
+      generate: [new OllamaUnreachableError("http://127.0.0.1:11434/api/generate")],
+    });
+    const failures: DraftFailure[] = [];
+
+    await expect(
+      draft({ client: stub, onAttempt: (f) => failures.push(f) }, INPUT_16, cfg()),
+    ).rejects.toBeInstanceOf(OllamaUnreachableError);
+
+    expect(failures).toEqual([]);
+  });
+
+  it("names the ratio and both of its terms, unclamped — amendment A5", async () => {
+    const hundred = Array.from({ length: 100 }, (_, y) => (y < 16 ? CLEAN_16[y] : ".".repeat(16)));
+    const stub = createStubClient({ generate: [reply(hundred)] });
+    const failures: DraftFailure[] = [];
+
+    await expect(
+      draft(
+        { client: stub, onAttempt: (f) => failures.push(f) },
+        INPUT_16,
+        cfg({ maxDraftRetries: 0 }),
+      ),
+    ).rejects.toBeInstanceOf(DraftRejectedError);
+
+    expect(failures[0].reason).toBe(
+      "1344 repaired cells of 256 (525.0%) exceeded repairRejectThreshold 0.2",
+    );
+  });
+
+  it("stays optional — the Wave 6 call shape is unchanged", async () => {
+    const stub = createStubClient({ generate: [reply(CLEAN_16)] });
+    await expect(draft({ client: stub }, INPUT_16, cfg())).resolves.toBeDefined();
   });
 });
