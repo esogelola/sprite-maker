@@ -52,21 +52,33 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CritiqueReportSchema,
   HarnessConfigSchema,
+  IssueSchema,
   LintReportSchema,
   RoundSchema,
   SessionHistorySchema,
   SpriteDocSchema,
+  STOP_REASONS,
+  type CritiqueReport,
+  type Issue,
+  type LintReport,
   type PipelineEvent,
   type Round,
   type SessionHistory,
   type SpriteDoc,
+  type StopReason,
 } from "@shared/schema";
 
 import { App } from "../../src/renderer/App";
 import { Canvas, cellSizePx } from "../../src/renderer/components/Canvas";
+import { CritiqueDock } from "../../src/renderer/components/CritiqueDock";
 import { Filmstrip } from "../../src/renderer/components/Filmstrip";
+import { GateBar } from "../../src/renderer/components/GateBar";
+import { ModelPickers } from "../../src/renderer/components/ModelPickers";
 import { PaletteBar } from "../../src/renderer/components/PaletteBar";
+import { PromptBar } from "../../src/renderer/components/PromptBar";
+import { StatusBar } from "../../src/renderer/components/StatusBar";
 import { editorStore } from "../../src/renderer/state/store";
 import type { Api } from "../../src/preload/index";
 
@@ -158,7 +170,7 @@ const EMPTY_LINT = LintReportSchema.parse({
   metrics: { coverage: 0.01, paletteUsed: 1, orphanCount: 1, symmetryScore: 1 },
 });
 
-function round(n: number, d: SpriteDoc): Round {
+function round(n: number, d: SpriteDoc, overrides: Partial<Round> = {}): Round {
   return RoundSchema.parse({
     round: n,
     doc: d,
@@ -169,8 +181,100 @@ function round(n: number, d: SpriteDoc): Round {
     userFeedback: null,
     revise: null,
     timings: { draftMs: null, critiqueMs: null, reviseMs: null },
+    ...overrides,
   });
 }
+
+// ---------------------------------------------------------------------------
+// critique and lint fixtures — Wave 12
+// ---------------------------------------------------------------------------
+
+/**
+ * §6.4's three cells, in one report.
+ *
+ * `issue-0` is **the** case the twin bars exist for: `confidence 0.98`,
+ * `suggestConfidence 0.20` — *definitely wrong, but my fix is a guess*. A dock
+ * that renders one number twice makes it indistinguishable from `0.98/0.98`.
+ *
+ * `issue-2` carries `confidence: 0` and `suggestConfidence: 0`. Both are legal
+ * values, both are falsy, and the second is below `confidenceFloor` — so it is
+ * the issue the reviser never received, and it is the one a truthiness check
+ * renders as blank.
+ */
+const ISSUES: Issue[] = [
+  IssueSchema.parse({
+    id: "issue-0",
+    region: [2, 4, 5, 6],
+    severity: "high",
+    issue: "the left eye reads as a smudge at this scale",
+    suggest: "add a light pixel inside the eye",
+    confidence: 0.98,
+    suggestConfidence: 0.2,
+  }),
+  IssueSchema.parse({
+    id: "issue-1",
+    region: [0, 0, 1, 1],
+    severity: "medium",
+    issue: "outline gap on the left flank",
+    suggest: "place index 0 at (7, 12)",
+    confidence: 0.77,
+    suggestConfidence: 0.88,
+  }),
+  IssueSchema.parse({
+    id: "issue-2",
+    region: [9, 9, 10, 10],
+    severity: "low",
+    issue: "a stray pixel floats off the tail",
+    suggest: "clear (9, 9)",
+    confidence: 0,
+    suggestConfidence: 0,
+  }),
+];
+
+/** What `filterIssues` leaves: `issue-2` dropped, `issue-0`'s guess blanked. */
+const FILTERED: Issue[] = [
+  IssueSchema.parse({ ...ISSUES[0], suggest: "" }),
+  ISSUES[1],
+];
+
+const CRITIQUE: CritiqueReport = CritiqueReportSchema.parse({
+  readsAs: "a dog, standing, but the face is hard to read",
+  matchesIntent: true,
+  overall: 4,
+  degraded: false,
+  issues: ISSUES,
+});
+
+/** §6.4's degraded report: the critic could not be parsed twice. */
+const DEGRADED: CritiqueReport = CritiqueReportSchema.parse({
+  readsAs: null,
+  matchesIntent: true,
+  overall: null,
+  degraded: true,
+  issues: [],
+});
+
+/** A converged critique — zero issues, and the dock must still render (R2). */
+const CONVERGED: CritiqueReport = CritiqueReportSchema.parse({
+  readsAs: "a dog, standing, reads clearly",
+  matchesIntent: true,
+  overall: 3,
+  degraded: false,
+  issues: [],
+});
+
+/**
+ * A lint report with something to say — including `orphanCount: 0`, which is a
+ * measured fact and not an absence.
+ */
+const BUSY_LINT: LintReport = LintReportSchema.parse({
+  warnings: [
+    { code: "orphan-pixel", cells: [[3, 3]], message: "1 orphan pixel" },
+    { code: "low-contrast", cells: [[1, 1]], indices: [2, 3], message: "indices 2 and 3" },
+    { code: "unused-palette-entry", cells: [], indices: [5], message: "index 5 is unused" },
+  ],
+  metrics: { coverage: 0.18, paletteUsed: 4, orphanCount: 0, symmetryScore: 0.913 },
+});
 
 /**
  * Three rounds whose row 0 differs in the *first three cells* — `0..`, `.1.`,
@@ -213,6 +317,10 @@ interface Harness {
   setPixel: ReturnType<typeof vi.fn>;
   getSession: ReturnType<typeof vi.fn>;
   run: ReturnType<typeof vi.fn>;
+  accept: ReturnType<typeof vi.fn>;
+  applyFeedback: ReturnType<typeof vi.fn>;
+  exportPng: ReturnType<typeof vi.fn>;
+  bindModel: ReturnType<typeof vi.fn>;
   /** What the next `getSession` resolves with. */
   session: SessionHistory | null;
 }
@@ -238,17 +346,57 @@ function harness(initial: SessionHistory | null = null): Harness {
   const getSession = vi.fn(async () => ({ ok: true as const, value: state.session }));
   const run = vi.fn(async () => ({ ok: true as const, value: state.session as SessionHistory }));
 
+  /**
+   * `main/pipeline.ts`'s own `accept`, in miniature — and the whole point of the
+   * wave: it converts the renderer's **0-based** index into the **1-based**
+   * `Round.round` that `acceptedRound` holds (§6.7), rather than storing the
+   * index it was handed.
+   */
+  const accept = vi.fn(async (roundIndex: number) => {
+    const current = state.session;
+    if (current === null) return { ok: false as const, code: "no-session", message: "no session" };
+    const target = current.rounds[roundIndex];
+    if (target === undefined) {
+      return { ok: false as const, code: "bad-index", message: `no round at ${roundIndex}` };
+    }
+    state.session = SessionHistorySchema.parse({
+      ...current,
+      acceptedRound: target.round,
+      finalState: "DONE",
+    });
+    return { ok: true as const, value: state.session };
+  });
+
+  const applyFeedback = vi.fn(async (feedback: string, roundIndex: number) => {
+    const current = state.session;
+    if (current === null) return { ok: false as const, code: "no-session", message: "no session" };
+    const rounds = current.rounds.slice();
+    rounds[roundIndex] = RoundSchema.parse({ ...rounds[roundIndex], userFeedback: feedback });
+    state.session = SessionHistorySchema.parse({ ...current, rounds });
+    return { ok: true as const, value: state.session };
+  });
+
+  // Wave 10's registered placeholder, verbatim in shape: the handler exists and
+  // says so, rather than the channel rejecting with "No handler registered".
+  const exportPng = vi.fn(async (roundIndex: number, scale: number) => ({
+    ok: false as const,
+    code: "not-implemented",
+    message: `exportPng(${roundIndex}, ${scale}) is not implemented until Wave 13`,
+  }));
+
+  const bindModel = vi.fn(async () => ({ ok: true as const, value: undefined }));
+
   const api = {
     listModels: vi.fn(async () => ({ ok: true as const, value: [] as string[] })),
     getModels: vi.fn(async () => ({ generator: "g", critic: "c" })),
-    bindModel: vi.fn(async () => ({ ok: true as const, value: undefined })),
+    bindModel,
     getConfig: vi.fn(async () => HarnessConfigSchema.parse({})),
     getPalettes: vi.fn(async () => []),
     run,
-    applyFeedback: vi.fn(),
-    accept: vi.fn(),
+    applyFeedback,
+    accept,
     setPixel,
-    exportPng: vi.fn(),
+    exportPng,
     getSessionPath: vi.fn(async () => "/tmp/session.json"),
     getSession,
     onEvent: (cb: Listener) => {
@@ -263,6 +411,10 @@ function harness(initial: SessionHistory | null = null): Harness {
     setPixel,
     getSession,
     run,
+    accept,
+    applyFeedback,
+    exportPng,
+    bindModel,
     get session() {
       return state.session;
     },
@@ -612,9 +764,42 @@ describe("editorStore", () => {
     expect(editorStore.getSnapshot().selectedRound).toBe(0);
   });
 
+  /**
+   * The assertion is that the selection did not *move* — an out-of-range index
+   * is ignored, not clamped. It is read back rather than compared against a
+   * literal because what the selection happens to be on a freshly adopted
+   * session is the next test's subject, not this one's.
+   */
   it("refuses a round index the session does not have", () => {
     editorStore.setHistory(history());
+    const before = editorStore.getSnapshot().selectedRound;
+
     editorStore.selectRound(9);
+
+    expect(editorStore.getSnapshot().selectedRound).toBe(before);
+  });
+
+  /**
+   * A renderer reload finds main still holding a session (§8), and the round the
+   * finished run left on screen is the last one — there is no earlier selection
+   * to preserve, so decision 4's rule applies at this entry point too.
+   */
+  it("shows the newest round when it sees a session for the first time", () => {
+    editorStore.setHistory(history());
+    expect(editorStore.getSnapshot().selectedRound).toBe(2);
+  });
+
+  /**
+   * …and never afterwards. `accept` and `setPixel` both re-enter `setHistory`,
+   * and a canvas that jumps back to the newest round after the user scrubbed to
+   * round 1 and accepted it would undo the one thing Wave 12 exists to do.
+   */
+  it("keeps a scrubbed-back selection when the session is refreshed", () => {
+    editorStore.setHistory(history());
+    editorStore.selectRound(0);
+
+    editorStore.setHistory(history(ROUND_ROWS, 1));
+
     expect(editorStore.getSnapshot().selectedRound).toBe(0);
   });
 
@@ -795,5 +980,917 @@ describe("App", () => {
     await waitFor(() =>
       expect(screen.getByTestId("error").textContent).toMatch(/127\.0\.0\.1:11434/),
     );
+  });
+});
+
+// ===========================================================================
+// Wave 12 — the surfaces that make the tool usable
+// ===========================================================================
+
+/**
+ * Three rounds carrying everything the dock renders.
+ *
+ * Round 1 is the one the measured evidence says is usually best
+ * (`captures/2026-07-30-wave-11-rounds.txt`): symmetry 0.913, critic score 1/5.
+ * Round 3 has converged — zero issues — and the dock must still render it (R2).
+ */
+function critiquedHistory(acceptedRound: number | null = null): SessionHistory {
+  const rows = ROUND_ROWS.map((row) => [row, ...blank(16).slice(1)]);
+  return SessionHistorySchema.parse({
+    schemaVersion: 1,
+    sessionId: "session-wave-12",
+    config: HarnessConfigSchema.parse({}),
+    rounds: [
+      round(1, doc("dc-round-1", 16, rows[0], PICO_8, 1), {
+        lint: BUSY_LINT,
+        critique: CRITIQUE,
+        filteredIssues: FILTERED,
+        diffFromPrev: null,
+        revise: { turns: 8, hitCap: false, summary: "Reduced head size by clearing top row pixels." },
+        timings: { draftMs: 6272, critiqueMs: 21715, reviseMs: 25005 },
+      }),
+      round(2, doc("dc-round-2", 16, rows[1], PICO_8, 2), {
+        lint: BUSY_LINT,
+        critique: CRITIQUE,
+        filteredIssues: FILTERED,
+        diffFromPrev: [{ x: 1, y: 0, from: ".", to: "1" }],
+        revise: { turns: 5, hitCap: false, summary: "Redrew the head." },
+      }),
+      round(3, doc("dc-round-3", 16, rows[2], PICO_8, 3), {
+        lint: BUSY_LINT,
+        critique: CONVERGED,
+        filteredIssues: [],
+        diffFromPrev: [],
+      }),
+    ],
+    draftFailures: [],
+    stopReason: "round-cap",
+    finalState: acceptedRound === null ? "AWAITING_USER" : "DONE",
+    outcome: "completed",
+    error: null,
+    acceptedRound,
+  });
+}
+
+/** The width a confidence bar's fill actually renders at. */
+function barFill(el: HTMLElement): string {
+  const fillEl = el.querySelector<HTMLElement>("[data-fill]");
+  if (fillEl === null) throw new Error("a confidence bar rendered no fill element");
+  return fillEl.style.width;
+}
+
+function bars(scope: HTMLElement): HTMLElement[] {
+  return Array.from(scope.querySelectorAll<HTMLElement>('[data-testid="confidence-bar"]'));
+}
+
+// ---------------------------------------------------------------------------
+// CritiqueDock
+// ---------------------------------------------------------------------------
+
+describe("CritiqueDock", () => {
+  const noop = (): void => {};
+  const H = critiquedHistory();
+
+  it("renders nothing when no round is selected", () => {
+    const { container } = render(
+      <CritiqueDock round={null} activeIssueId={null} onSelectIssue={noop} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  /**
+   * Ruling R2, and the mutant this pins: a dock that hides on an empty issue
+   * list makes a converged run look identical to one that never critiqued.
+   */
+  it("renders on a converged round with zero issues, lint block and all", () => {
+    render(<CritiqueDock round={H.rounds[2]} activeIssueId={null} onSelectIssue={noop} />);
+
+    expect(screen.getByTestId("dock")).toBeDefined();
+    expect(screen.queryAllByTestId("issue")).toHaveLength(0);
+    expect(screen.getByTestId("dock").textContent).toMatch(/no high-severity issues|converged/i);
+    // §8: the dock renders `Round.lint` — Wave 3 built a linter whose output
+    // reached no surface, and an empty issue list is not a reason to hide it.
+    expect(screen.getByTestId("lint")).toBeDefined();
+  });
+
+  it("renders what the critic said the sprite reads as", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    expect(screen.getByTestId("reads-as").textContent).toMatch(/the face is hard to read/);
+  });
+
+  /**
+   * §6.4 measured `overall` running 1 → 4 → 3 while symmetry fell 0.913 → 0.493
+   * → 0.441. It is the critic's opinion, and the dock must not sell it as a
+   * quality score.
+   */
+  it("labels overall as the critic's own opinion, not a quality score", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const overall = screen.getByTestId("overall");
+    expect(overall.getAttribute("data-overall")).toBe("4");
+    expect(overall.textContent).toMatch(/opinion/i);
+  });
+
+  it("renders one bar per confidence field, each at its own value", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const first = screen.getAllByTestId("issue")[0];
+    const [problem, fix] = bars(first);
+
+    expect(problem.getAttribute("data-field")).toBe("confidence");
+    expect(fix.getAttribute("data-field")).toBe("suggestConfidence");
+    expect(problem.getAttribute("data-value")).toBe("0.98");
+    expect(fix.getAttribute("data-value")).toBe("0.2");
+    expect(barFill(problem)).toBe("98%");
+    expect(barFill(fix)).toBe("20%");
+  });
+
+  /**
+   * §6.4's whole point, as an assertion: *0.98 / 0.20 must not look like
+   * 0.98 / 0.98.* A dock rendering `confidence` into both bars passes every
+   * other test in this file.
+   */
+  it("renders 0.98/0.20 visibly differently from 0.98/0.98", () => {
+    const twin = round(1, H.rounds[0].doc, {
+      critique: CritiqueReportSchema.parse({
+        ...CRITIQUE,
+        issues: [IssueSchema.parse({ ...ISSUES[0], suggestConfidence: 0.98 })],
+      }),
+      filteredIssues: [IssueSchema.parse({ ...ISSUES[0], suggestConfidence: 0.98 })],
+    });
+
+    const split = render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+    const splitBars = bars(screen.getAllByTestId("issue")[0]).map(barFill);
+    expect(splitBars[0]).not.toBe(splitBars[1]);
+    split.unmount();
+
+    render(<CritiqueDock round={twin} activeIssueId={null} onSelectIssue={noop} />);
+    const twinBars = bars(screen.getAllByTestId("issue")[0]).map(barFill);
+    expect(twinBars[0]).toBe(twinBars[1]);
+    // And the two renderings are not the same picture.
+    expect(splitBars.join("/")).not.toBe(twinBars.join("/"));
+  });
+
+  /** Falsy zero: `confidence: 0` is a value the critic emitted, not an absence. */
+  it("renders a zero confidence as 0.00 rather than as nothing", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const stray = screen.getAllByTestId("issue")[2];
+    const [problem, fix] = bars(stray);
+
+    expect(problem.getAttribute("data-value")).toBe("0");
+    expect(problem.textContent).toMatch(/0\.00/);
+    expect(barFill(problem)).toBe("0%");
+    expect(fix.textContent).toMatch(/0\.00/);
+  });
+
+  /**
+   * `critique` is raw and `filteredIssues` is what the reviser received (§6.7).
+   * An issue below `confidenceFloor` never reached the agent, and saying so is
+   * the difference between "the critic mentioned this" and "the loop acted on
+   * this".
+   */
+  it("marks an issue the reviser never received", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const issues = screen.getAllByTestId("issue");
+    expect(issues[0].getAttribute("data-sent")).toBe("true");
+    expect(issues[2].getAttribute("data-sent")).toBe("false");
+    expect(issues[2].textContent).toMatch(/below the confidence floor|not sent/i);
+  });
+
+  /** §6.4: a blanked `suggest` is the signal, and it has to be legible as one. */
+  it("says the fix was withheld rather than showing text the agent never got", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const issues = screen.getAllByTestId("issue");
+    expect(issues[0].getAttribute("data-suggest-withheld")).toBe("true");
+    expect(issues[0].textContent).not.toMatch(/add a light pixel inside the eye/);
+    // The one whose fix cleared the floor still shows it.
+    expect(issues[1].getAttribute("data-suggest-withheld")).toBe("false");
+    expect(issues[1].textContent).toMatch(/place index 0 at \(7, 12\)/);
+  });
+
+  it("reports the clicked issue's id", () => {
+    const onSelectIssue = vi.fn();
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={onSelectIssue} />);
+
+    fireEvent.click(screen.getAllByTestId("issue")[1]);
+    expect(onSelectIssue).toHaveBeenCalledWith("issue-1");
+  });
+
+  it("marks the active issue and only that one", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId="issue-1" onSelectIssue={noop} />);
+
+    const active = screen.getAllByTestId("issue").filter((i) => i.getAttribute("data-active") === "true");
+    expect(active).toHaveLength(1);
+    expect(active[0].getAttribute("data-issue-id")).toBe("issue-1");
+  });
+
+  it("renders the deterministic lint metrics, including a zero orphan count", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const lintBlock = screen.getByTestId("lint");
+    expect(lintBlock.textContent).toMatch(/0\.913/); // symmetry
+    expect(lintBlock.textContent).toMatch(/0\.18/); // coverage
+    expect(lintBlock.textContent).toMatch(/4/); // palette entries used
+    // Falsy zero: `orphanCount: 0` is a measurement, and a blank is not one.
+    const orphans = screen.getByTestId("lint-orphans");
+    expect(orphans.getAttribute("data-count")).toBe("0");
+    expect(orphans.textContent).toMatch(/0/);
+  });
+
+  it("renders every lint warning the round carries, by code", () => {
+    render(<CritiqueDock round={H.rounds[0]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const codes = screen.getAllByTestId("lint-warning").map((w) => w.getAttribute("data-code"));
+    expect(codes).toEqual(["orphan-pixel", "low-contrast", "unused-palette-entry"]);
+  });
+
+  /**
+   * Measured: a round claimed it "reduced head size by clearing top row pixels"
+   * while adding 44 cells of coloured bands. The prose is the agent's claim; the
+   * number beside it is what happened.
+   */
+  it("labels the revise summary as the agent's claim and puts the diff beside it", () => {
+    render(<CritiqueDock round={H.rounds[1]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const claim = screen.getByTestId("revise-claim");
+    expect(claim.textContent).toMatch(/Redrew the head/);
+    expect(claim.textContent).toMatch(/claim/i);
+    expect(screen.getByTestId("diff-count").getAttribute("data-cells")).toBe("1");
+  });
+
+  /** Falsy zero on the other axis: a revise that changed nothing changed 0 cells. */
+  it("renders an empty diff as 0 cells changed", () => {
+    render(<CritiqueDock round={H.rounds[2]} activeIssueId={null} onSelectIssue={noop} />);
+
+    const diff = screen.getByTestId("diff-count");
+    expect(diff.getAttribute("data-cells")).toBe("0");
+    expect(diff.textContent).toMatch(/0/);
+  });
+
+  it("says the critic could not be read when the report is degraded", () => {
+    const degraded = round(1, H.rounds[0].doc, { critique: DEGRADED, filteredIssues: [] });
+    render(<CritiqueDock round={degraded} activeIssueId={null} onSelectIssue={noop} />);
+
+    expect(screen.getByTestId("dock").textContent).toMatch(/could not be read|degraded/i);
+    // Never an invented score.
+    expect(screen.queryByTestId("overall")).toBeNull();
+  });
+
+  it("still renders the lint block on a round no critic has seen", () => {
+    const handEdit = round(4, H.rounds[0].doc, { lint: BUSY_LINT, critique: null });
+    render(<CritiqueDock round={handEdit} activeIssueId={null} onSelectIssue={noop} />);
+
+    expect(screen.getByTestId("lint")).toBeDefined();
+    expect(screen.getByTestId("dock").textContent).toMatch(/not been critiqued|no critique/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GateBar
+// ---------------------------------------------------------------------------
+
+describe("GateBar", () => {
+  const noop = (): void => {};
+  const props = {
+    state: "AWAITING_USER" as const,
+    selectedRound: 0,
+    roundNumber: 1,
+    acceptedRound: null,
+    pending: null,
+    onAccept: noop,
+    onFeedback: noop,
+    onExport: noop,
+  };
+
+  it("renders at the gate", () => {
+    render(<GateBar {...props} />);
+    expect(screen.getByTestId("gate")).toBeDefined();
+    expect(screen.getByTestId("accept")).toBeDefined();
+    expect(screen.getByTestId("export")).toBeDefined();
+    expect(screen.getByTestId("feedback")).toBeDefined();
+  });
+
+  it("does not render mid-run", () => {
+    const { container } = render(<GateBar {...props} state="REVISING" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  /**
+   * The wave's reason for existing. `selectedRound: 0` is the first round, the
+   * measured-best one, and the most common accept target — a truthiness check
+   * here reads it as "nothing selected".
+   */
+  it("accepts the round the filmstrip has selected, including round index 0", () => {
+    const onAccept = vi.fn();
+    render(<GateBar {...props} selectedRound={0} roundNumber={1} onAccept={onAccept} />);
+
+    fireEvent.click(screen.getByTestId("accept"));
+    expect(onAccept).toHaveBeenCalledWith(0);
+  });
+
+  it("accepts a later selected round by its own index", () => {
+    const onAccept = vi.fn();
+    render(<GateBar {...props} selectedRound={2} roundNumber={3} onAccept={onAccept} />);
+
+    fireEvent.click(screen.getByTestId("accept"));
+    expect(onAccept).toHaveBeenCalledWith(2);
+  });
+
+  it("names the round Accept would keep", () => {
+    render(<GateBar {...props} selectedRound={0} roundNumber={1} />);
+    expect(screen.getByTestId("accept").textContent).toMatch(/round 1/);
+  });
+
+  it("sends feedback against the selected round", () => {
+    const onFeedback = vi.fn();
+    render(<GateBar {...props} selectedRound={1} roundNumber={2} onFeedback={onFeedback} />);
+
+    fireEvent.change(screen.getByTestId("feedback"), { target: { value: "make the tail fluffier" } });
+    fireEvent.click(screen.getByTestId("send-feedback"));
+
+    expect(onFeedback).toHaveBeenCalledWith("make the tail fluffier", 1);
+  });
+
+  /** Falsy zero, on the feedback path too: round index 0 is a round. */
+  it("sends feedback against round index 0", () => {
+    const onFeedback = vi.fn();
+    render(<GateBar {...props} selectedRound={0} roundNumber={1} onFeedback={onFeedback} />);
+
+    fireEvent.change(screen.getByTestId("feedback"), { target: { value: "shorter ears" } });
+    fireEvent.click(screen.getByTestId("send-feedback"));
+
+    expect(onFeedback).toHaveBeenCalledWith("shorter ears", 0);
+  });
+
+  it("exports round index 0", () => {
+    const onExport = vi.fn();
+    render(<GateBar {...props} selectedRound={0} roundNumber={1} onExport={onExport} />);
+
+    fireEvent.click(screen.getByTestId("export"));
+    expect(onExport).toHaveBeenCalledWith(0);
+  });
+
+  it("refuses to send empty feedback", () => {
+    const onFeedback = vi.fn();
+    render(<GateBar {...props} onFeedback={onFeedback} />);
+
+    fireEvent.change(screen.getByTestId("feedback"), { target: { value: "   " } });
+    fireEvent.click(screen.getByTestId("send-feedback"));
+
+    expect(onFeedback).not.toHaveBeenCalled();
+  });
+
+  it("exports the selected round", () => {
+    const onExport = vi.fn();
+    render(<GateBar {...props} selectedRound={2} roundNumber={3} onExport={onExport} />);
+
+    fireEvent.click(screen.getByTestId("export"));
+    expect(onExport).toHaveBeenCalledWith(2);
+  });
+
+  /**
+   * Wave 14's script runs Accept (feature 10) before hand editing (11) and
+   * export (12). A gate that vanishes on `DONE` makes the ratified gate
+   * unrunnable and leaves the user with no way to export what they just kept.
+   */
+  it("survives the accept it just recorded, so the sprite can still be exported", () => {
+    render(<GateBar {...props} state="DONE" acceptedRound={1} />);
+
+    expect(screen.getByTestId("gate").textContent).toMatch(/round 1/);
+    expect(screen.getByTestId("export")).toBeDefined();
+  });
+
+  it("stands down while a mutation is in flight", () => {
+    render(<GateBar {...props} pending="run" />);
+
+    expect((screen.getByTestId("accept") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("send-feedback") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// StatusBar
+// ---------------------------------------------------------------------------
+
+describe("StatusBar", () => {
+  const base = {
+    state: "AWAITING_USER" as const,
+    history: null,
+    liveRound: 0,
+    turn: null,
+    failure: null,
+  };
+
+  function withStop(stopReason: StopReason): SessionHistory {
+    return SessionHistorySchema.parse({ ...critiquedHistory(), stopReason });
+  }
+
+  it("names the current state", () => {
+    render(<StatusBar {...base} state="REVISING" />);
+    expect(screen.getByTestId("state").textContent).toMatch(/REVISING/);
+  });
+
+  /**
+   * §8: state and stop reason are read from `SessionHistory` so they survive a
+   * reload. No event is emitted anywhere in this test.
+   */
+  it("reads the stop reason off the history, with no events at all", () => {
+    render(<StatusBar {...base} history={withStop("round-cap")} />);
+
+    expect(screen.getByTestId("state").textContent).toMatch(/round-cap|round cap/);
+  });
+
+  /** All five (§7.2), and each one in words a user can act on. */
+  it("explains every stop reason in plain language", () => {
+    for (const reason of STOP_REASONS) {
+      const view = render(<StatusBar {...base} history={withStop(reason)} />);
+      const stop = screen.getByTestId("stop-reason");
+      expect(stop.getAttribute("data-reason")).toBe(reason);
+      // Not the bare enum echoed back — an explanation beside it.
+      expect(stop.textContent!.replace(reason, "").trim().length).toBeGreaterThan(12);
+      view.unmount();
+    }
+  });
+
+  /** Amendment A14, the newest reason and the one a default branch swallows. */
+  it("says plainly that a regressed revision was discarded", () => {
+    render(<StatusBar {...base} history={withStop("revise-regressed")} />);
+
+    const stop = screen.getByTestId("stop-reason");
+    expect(stop.getAttribute("data-reason")).toBe("revise-regressed");
+    expect(stop.textContent).toMatch(/discard/i);
+    expect(stop.textContent).toMatch(/worse/i);
+  });
+
+  it("names the accepted round", () => {
+    render(<StatusBar {...base} state="DONE" history={critiquedHistory(1)} />);
+    expect(screen.getByTestId("state").textContent).toMatch(/accepted round 1/);
+  });
+
+  /**
+   * Wave 10b single-flighted the session, and with no cancellation the refusal
+   * window is *minutes*. A refusal the UI swallows is exactly the class of
+   * defect §8 names: an action that did not happen, reported as if it had.
+   */
+  it("renders a busy refusal rather than swallowing it", () => {
+    render(
+      <StatusBar
+        {...base}
+        failure={{ code: "busy", message: "accept: run is still in flight — one session mutation at a time" }}
+      />,
+    );
+
+    const error = screen.getByTestId("error");
+    expect(error.getAttribute("data-code")).toBe("busy");
+    expect(error.textContent).toMatch(/still in flight/);
+  });
+
+  it("names the exact endpoint when Ollama is unreachable", () => {
+    render(
+      <StatusBar
+        {...base}
+        failure={{
+          code: "ollama-unreachable",
+          message: "could not reach Ollama",
+          endpoint: "http://127.0.0.1:11434/api/generate",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("error").textContent).toMatch(/127\.0\.0\.1:11434/);
+  });
+
+  it("renders the run failure the history recorded", () => {
+    const failed = SessionHistorySchema.parse({
+      ...critiquedHistory(),
+      outcome: "failed",
+      finalState: "FAILED",
+      error: "OllamaTimeoutError: qwen3-vl:8b-instruct-q4_K_M timed out after 45000ms",
+    });
+    render(<StatusBar {...base} state="FAILED" history={failed} />);
+
+    expect(screen.getByTestId("history-error").textContent).toMatch(/timed out after 45000ms/);
+  });
+
+  it("shows the revise turn while the longest stage runs", () => {
+    render(<StatusBar {...base} state="REVISING" liveRound={2} turn="turn 7 of 40" />);
+
+    expect(screen.getByTestId("state").textContent).toMatch(/turn 7 of 40/);
+    expect(screen.getByTestId("state").textContent).toMatch(/round 2/);
+  });
+
+  /**
+   * …and retires it once the run has settled. "round 3" beside "accepted round
+   * 1" reads as the round on screen, which it is not — the filmstrip says that,
+   * and the round *count* says how many there were.
+   */
+  it("stops naming the live round once the run has settled", () => {
+    render(<StatusBar {...base} state="DONE" history={critiquedHistory(1)} liveRound={3} />);
+
+    const text = screen.getByTestId("state").textContent!;
+    expect(text).toMatch(/3 rounds/);
+    expect(text).toMatch(/accepted round 1/);
+    expect(text).not.toMatch(/· round 3/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ModelPickers
+// ---------------------------------------------------------------------------
+
+describe("ModelPickers", () => {
+  const noop = (): void => {};
+  const INSTALLED = ["qwen3-vl:8b-instruct-q4_K_M", "qwen3:8b", "llama3.2:3b"];
+  const DEFAULT_MODEL = "qwen3-vl:8b-instruct-q4_K_M";
+
+  it("offers every installed model for both roles", () => {
+    render(
+      <ModelPickers
+        installed={INSTALLED}
+        bound={{ generator: DEFAULT_MODEL, critic: DEFAULT_MODEL }}
+        onBind={noop}
+      />,
+    );
+
+    for (const id of ["model-generator", "model-critic"]) {
+      const select = screen.getByTestId(id) as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(INSTALLED);
+    }
+  });
+
+  /** §6.8's shipped default, for both roles (amendment A10). */
+  it("shows the bound model as the selected one", () => {
+    render(
+      <ModelPickers
+        installed={INSTALLED}
+        bound={{ generator: DEFAULT_MODEL, critic: "qwen3:8b" }}
+        onBind={noop}
+      />,
+    );
+
+    expect((screen.getByTestId("model-generator") as HTMLSelectElement).value).toBe(DEFAULT_MODEL);
+    expect((screen.getByTestId("model-critic") as HTMLSelectElement).value).toBe("qwen3:8b");
+  });
+
+  it("reports the role and the model chosen", () => {
+    const onBind = vi.fn();
+    render(
+      <ModelPickers
+        installed={INSTALLED}
+        bound={{ generator: DEFAULT_MODEL, critic: DEFAULT_MODEL }}
+        onBind={onBind}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId("model-critic"), { target: { value: "qwen3:8b" } });
+    expect(onBind).toHaveBeenCalledWith("critic", "qwen3:8b");
+  });
+
+  /**
+   * §9: "if one disappears mid-session, fail the round naming the model". A
+   * picker that silently drops the bound model shows a value that is not what
+   * the next run will call, which is a lie rather than a missing option.
+   */
+  it("still shows a bound model Ollama no longer has", () => {
+    render(
+      <ModelPickers
+        installed={INSTALLED}
+        bound={{ generator: "qwen3-vl:30b-a3b", critic: DEFAULT_MODEL }}
+        onBind={noop}
+      />,
+    );
+
+    const select = screen.getByTestId("model-generator") as HTMLSelectElement;
+    expect(select.value).toBe("qwen3-vl:30b-a3b");
+    expect(select.textContent).toMatch(/not installed/i);
+  });
+
+  it("says so while the model list is still unknown", () => {
+    render(<ModelPickers installed={[]} bound={null} onBind={noop} />);
+    expect(screen.getByTestId("models-unavailable")).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PromptBar
+// ---------------------------------------------------------------------------
+
+describe("PromptBar", () => {
+  const noop = (): void => {};
+  const PALETTES = [
+    { id: "pico-8", name: "PICO-8", colors: [] as string[] },
+    { id: "gameboy", name: "Game Boy", colors: [] as string[] },
+  ];
+  const props = {
+    prompt: "a dog standing",
+    onPromptChange: noop,
+    size: 16 as const,
+    onSizeChange: noop,
+    paletteId: "pico-8",
+    onPaletteChange: noop,
+    palettes: PALETTES,
+    pending: null,
+    blocked: null,
+    onGenerate: noop,
+  };
+
+  it("offers the three canvas sizes §6.2 permits", () => {
+    render(<PromptBar {...props} />);
+    const select = screen.getByTestId("size") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["16", "32", "64"]);
+    expect(select.value).toBe("16");
+  });
+
+  it("offers the palette library", () => {
+    render(<PromptBar {...props} />);
+    const select = screen.getByTestId("palette-picker") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["pico-8", "gameboy"]);
+  });
+
+  it("reports a new size as a number, not a string", () => {
+    const onSizeChange = vi.fn();
+    render(<PromptBar {...props} onSizeChange={onSizeChange} />);
+
+    fireEvent.change(screen.getByTestId("size"), { target: { value: "64" } });
+    expect(onSizeChange).toHaveBeenCalledWith(64);
+  });
+
+  it("reports a new palette", () => {
+    const onPaletteChange = vi.fn();
+    render(<PromptBar {...props} onPaletteChange={onPaletteChange} />);
+
+    fireEvent.change(screen.getByTestId("palette-picker"), { target: { value: "gameboy" } });
+    expect(onPaletteChange).toHaveBeenCalledWith("gameboy");
+  });
+
+  it("refuses to generate from an empty prompt", () => {
+    render(<PromptBar {...props} prompt="   " />);
+    expect((screen.getByTestId("generate") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  /** §8: Generate is disabled when Ollama is unreachable. No silent fallback. */
+  it("refuses to generate while Ollama is unreachable", () => {
+    render(<PromptBar {...props} blocked="Ollama is unreachable at http://127.0.0.1:11434" />);
+    expect((screen.getByTestId("generate") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the store — Wave 12 additions
+// ---------------------------------------------------------------------------
+
+describe("editorStore — the active issue", () => {
+  it("starts with no issue selected", () => {
+    expect(editorStore.getSnapshot().activeIssueId).toBeNull();
+  });
+
+  it("selects and clears an issue", () => {
+    editorStore.selectIssue("issue-1");
+    expect(editorStore.getSnapshot().activeIssueId).toBe("issue-1");
+
+    editorStore.selectIssue(null);
+    expect(editorStore.getSnapshot().activeIssueId).toBeNull();
+  });
+
+  /**
+   * An issue belongs to one round's critique, and ids are synthesized from the
+   * issue's index (`issue-0`, `issue-1`, …) — so the same id exists in every
+   * round and means something different in each. Carrying a selection across a
+   * scrub highlights a region the user never clicked.
+   */
+  it("drops the active issue when the filmstrip moves", () => {
+    editorStore.setHistory(critiquedHistory());
+    editorStore.selectIssue("issue-0");
+    editorStore.selectRound(2);
+
+    expect(editorStore.getSnapshot().activeIssueId).toBeNull();
+  });
+
+  it("adopts the pipeline state the history records, so a reload keeps it", () => {
+    editorStore.setHistory(critiquedHistory(1));
+
+    expect(editorStore.getSnapshot().pipelineState).toBe("DONE");
+    expect(editorStore.getSnapshot().history!.acceptedRound).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// App — Wave 12: the gate, the dock and the highlight
+// ---------------------------------------------------------------------------
+
+describe("App — the gate", () => {
+  let h: Harness;
+
+  beforeEach(() => {
+    h = harness(critiquedHistory());
+    window.api = h.api;
+  });
+
+  /** The wave's acceptance criterion 2, and the defect that makes it pointless. */
+  it("accepts the round the filmstrip has selected, not the last one", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    // Scrub back to round 1 — the round measured best in this project's own run.
+    fireEvent.click(screen.getAllByTestId("frame")[0]);
+    await waitFor(() => expect(renderedRow(0)).toBe(ROUND_ROWS[0]));
+
+    fireEvent.click(screen.getByTestId("accept"));
+
+    // 0, the array index — not `rounds.length - 1`, and not skipped as falsy.
+    await waitFor(() => expect(h.accept).toHaveBeenCalledWith(0));
+    // And what came back is 1-based `Round.round`, on the frame it belongs to.
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("frame").filter((f) => f.getAttribute("data-accepted") === "true"),
+      ).toHaveLength(1),
+    );
+    expect(
+      screen
+        .getAllByTestId("frame")
+        .filter((f) => f.getAttribute("data-accepted") === "true")[0]
+        .getAttribute("data-round"),
+    ).toBe("1");
+    expect(h.session!.acceptedRound).toBe(1);
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toMatch(/DONE/));
+  });
+
+  it("accepts a later round by its own index", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    fireEvent.click(screen.getAllByTestId("frame")[2]);
+    await waitFor(() => expect(renderedRow(0)).toBe(ROUND_ROWS[2]));
+
+    fireEvent.click(screen.getByTestId("accept"));
+
+    await waitFor(() => expect(h.accept).toHaveBeenCalledWith(2));
+    await waitFor(() => expect(h.session!.acceptedRound).toBe(3));
+  });
+
+  /** Wave 10b's refusal, rendered. The renderer is not the authority (rule 5). */
+  it("renders a busy refusal from Accept instead of swallowing it", async () => {
+    (h.api as unknown as { accept: unknown }).accept = vi.fn(async () => ({
+      ok: false as const,
+      code: "busy",
+      message: "accept: run is still in flight — one session mutation at a time",
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    fireEvent.click(screen.getByTestId("accept"));
+
+    await waitFor(() => expect(screen.getByTestId("error").getAttribute("data-code")).toBe("busy"));
+    expect(screen.getByTestId("error").textContent).toMatch(/still in flight/);
+    // And nothing was marked accepted on the strength of a refusal.
+    expect(
+      screen.getAllByTestId("frame").filter((f) => f.getAttribute("data-accepted") === "true"),
+    ).toHaveLength(0);
+  });
+
+  /**
+   * `main/ipc.ts` rule 5 is the authority and answers `busy`; this is the
+   * courtesy half — while a mutation is in flight the gate says so and stands
+   * down, rather than inviting a second click that can only be refused.
+   */
+  it("stands the gate down while main is holding the session", async () => {
+    let release: (value: { ok: true; value: SessionHistory }) => void = () => {};
+    const held = new Promise<{ ok: true; value: SessionHistory }>((resolve) => {
+      release = resolve;
+    });
+    (h.api as unknown as { accept: unknown }).accept = vi.fn(() => held);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+    expect((screen.getByTestId("accept") as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId("accept"));
+
+    await waitFor(() =>
+      expect((screen.getByTestId("accept") as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(screen.getByTestId("gate-pending").textContent).toMatch(/accept/);
+
+    release({ ok: true, value: critiquedHistory(3) });
+    await waitFor(() =>
+      expect((screen.getByTestId("accept") as HTMLButtonElement).disabled).toBe(false),
+    );
+  });
+
+  it("sends feedback against the selected round", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    fireEvent.click(screen.getAllByTestId("frame")[1]);
+    await waitFor(() => expect(renderedRow(0)).toBe(ROUND_ROWS[1]));
+
+    fireEvent.change(screen.getByTestId("feedback"), { target: { value: "longer legs" } });
+    fireEvent.click(screen.getByTestId("send-feedback"));
+
+    await waitFor(() => expect(h.applyFeedback).toHaveBeenCalledWith("longer legs", 1));
+  });
+
+  /** Wave 13 builds it; until then the honest answer is that it did not happen. */
+  it("surfaces Export's not-implemented answer rather than pretending", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    fireEvent.click(screen.getByTestId("export"));
+
+    await waitFor(() => expect(h.exportPng).toHaveBeenCalledWith(2, 8));
+    await waitFor(() =>
+      expect(screen.getByTestId("error").getAttribute("data-code")).toBe("not-implemented"),
+    );
+  });
+});
+
+describe("App — the dock", () => {
+  let h: Harness;
+
+  beforeEach(() => {
+    h = harness(critiquedHistory());
+    window.api = h.api;
+  });
+
+  it("renders the selected round's critique and lint", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("dock")).toBeDefined());
+
+    expect(screen.getByTestId("lint")).toBeDefined();
+  });
+
+  /** §8: clicking an issue highlights its region on the canvas. */
+  it("highlights the clicked issue's region on the canvas", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+
+    fireEvent.click(screen.getAllByTestId("frame")[0]);
+    await waitFor(() => expect(screen.getAllByTestId("issue")).toHaveLength(3));
+
+    // Nothing lit before the click.
+    expect(cell(3, 5).getAttribute("data-highlight")).toBe("false");
+
+    fireEvent.click(screen.getAllByTestId("issue")[0]); // region [2, 4, 5, 6]
+
+    await waitFor(() => expect(cell(3, 5).getAttribute("data-highlight")).toBe("true"));
+    expect(cell(2, 4).getAttribute("data-highlight")).toBe("true");
+    expect(cell(5, 6).getAttribute("data-highlight")).toBe("true");
+    expect(cell(6, 6).getAttribute("data-highlight")).toBe("false");
+    expect(cell(1, 4).getAttribute("data-highlight")).toBe("false");
+  });
+
+  it("clears the highlight when the same issue is clicked again", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+    fireEvent.click(screen.getAllByTestId("frame")[0]);
+    await waitFor(() => expect(screen.getAllByTestId("issue")).toHaveLength(3));
+
+    fireEvent.click(screen.getAllByTestId("issue")[0]);
+    await waitFor(() => expect(cell(3, 5).getAttribute("data-highlight")).toBe("true"));
+
+    fireEvent.click(screen.getAllByTestId("issue")[0]);
+    await waitFor(() => expect(cell(3, 5).getAttribute("data-highlight")).toBe("false"));
+  });
+
+  it("drops the highlight when the filmstrip moves to another round", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+    fireEvent.click(screen.getAllByTestId("frame")[0]);
+    await waitFor(() => expect(screen.getAllByTestId("issue")).toHaveLength(3));
+
+    fireEvent.click(screen.getAllByTestId("issue")[0]);
+    await waitFor(() => expect(cell(3, 5).getAttribute("data-highlight")).toBe("true"));
+
+    fireEvent.click(screen.getAllByTestId("frame")[2]);
+    await waitFor(() => expect(cell(3, 5).getAttribute("data-highlight")).toBe("false"));
+  });
+});
+
+describe("App — reload survival", () => {
+  it("adopts the session main is still holding, with no events at all", async () => {
+    const h = harness(critiquedHistory(1));
+    window.api = h.api;
+    render(<App />);
+
+    // Nothing was generated in this renderer, and no event was emitted.
+    await waitFor(() => expect(screen.getAllByTestId("frame")).toHaveLength(3));
+    expect(h.run).not.toHaveBeenCalled();
+    expect(screen.getByTestId("state").textContent).toMatch(/DONE/);
+    expect(screen.getByTestId("stop-reason").getAttribute("data-reason")).toBe("round-cap");
+    expect(screen.getByTestId("state").textContent).toMatch(/accepted round 1/);
+  });
+
+  it("shows the first-run empty state when main holds nothing", async () => {
+    window.api = harness(null).api;
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("empty")).toBeDefined());
+    expect(screen.queryByTestId("dock")).toBeNull();
+    expect(screen.queryByTestId("gate")).toBeNull();
+    expect(screen.getByTestId("filmstrip-empty")).toBeDefined();
   });
 });

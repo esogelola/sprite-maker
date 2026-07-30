@@ -37,6 +37,19 @@
  * end.** A run in progress should show what it just made; a user who has scrubbed
  * back to compare round 1 against round 3 — the entire reason Wave 11 exists —
  * must not have the canvas yanked out from under them when round 3 lands.
+ *
+ * **5. `activeIssueId` belongs to the selected round, and moving the selection
+ * clears it** (Wave 12). `main/critique.ts` synthesizes a missing id from the
+ * issue's *index* — `issue-0`, `issue-1` — so the same id exists in every round's
+ * critique and names a different problem in each. Carried across a scrub it
+ * highlights a region the user never clicked, which is worse than no highlight.
+ *
+ * **6. `pipelineState` and `stopReason` are adopted from the history** (§8), so
+ * both survive a reload: `getSession()` answers with whatever main is holding and
+ * the surfaces read that, rather than the transient event stream that a reload
+ * has already thrown away. Events still drive the state *during* a run, because
+ * `run()` does not resolve until the gate (§12) and there is no history to read
+ * until it does.
  */
 
 import { useSyncExternalStore } from "react";
@@ -59,6 +72,13 @@ export interface EditorState {
   readonly selectedRound: number;
   /** The row character a canvas click paints — `"."` or `0`-`f` (§6.1). */
   readonly activeIndex: string;
+  /**
+   * `Issue.id` of the issue whose region the canvas highlights, or `null`.
+   *
+   * Scoped to the selected round by decision 5 — the id alone does not identify
+   * an issue across rounds.
+   */
+  readonly activeIssueId: string | null;
   readonly pipelineState: PipelineState;
   readonly stopReason: StopReason | null;
 }
@@ -71,6 +91,7 @@ const INITIAL: EditorState = {
   // check at every read site.
   selectedRound: 0,
   activeIndex: "0",
+  activeIssueId: null,
   pipelineState: "IDLE",
   stopReason: null,
 };
@@ -122,16 +143,35 @@ export const editorStore = {
   /**
    * Adopt a whole session — the authority after an edit and at the end of a run.
    *
-   * `stopReason` is read off the history rather than off the event stream (§8):
-   * the transient event is gone after a reload, and the artifact is not.
+   * `stopReason` **and `pipelineState`** are read off the history rather than off
+   * the event stream (§8, decision 6): the transient events are gone after a
+   * reload, and the artifact is not. `finalState` is what `accept` moved to
+   * `DONE`, what `releaseAcceptance` moved back, and what a `FAILED` run
+   * recorded — so adopting it here is the one place the surfaces learn any of
+   * that without being told twice.
+   *
+   * A `null` history is a new run or a first run: back to `IDLE` with no stop
+   * reason, rather than leaving a previous run's `DONE` on screen over an empty
+   * canvas.
    */
   setHistory(history: SessionHistory | null): void {
     const rounds = history === null ? [] : history.rounds;
+    // Decision 4, on the other entry point. A renderer seeing a session for the
+    // first time — a reload while main is still holding one — has no selection
+    // worth preserving, and the round the finished run left on screen is the
+    // last one. Once there *is* a selection it is preserved: `accept` and
+    // `setPixel` both re-enter here, and jumping the canvas to round 3 after the
+    // user scrubbed to round 1 and accepted it would undo the wave.
+    const firstSight = state.rounds.length === 0 && rounds.length > 0;
+    const selectedRound = firstSight ? rounds.length - 1 : clamp(state.selectedRound, rounds.length);
     set({
       history,
       rounds,
-      selectedRound: clamp(state.selectedRound, rounds.length),
+      selectedRound,
+      // Decision 5: an issue id only means something inside one round.
+      activeIssueId: selectedRound === state.selectedRound ? state.activeIssueId : null,
       stopReason: history === null ? null : history.stopReason,
+      pipelineState: history === null ? "IDLE" : history.finalState,
     });
   },
 
@@ -151,7 +191,13 @@ export const editorStore = {
 
     // Decision 4: follow the head, never a scrubbed-back selection.
     const wasAtEnd = state.selectedRound >= state.rounds.length - 1;
-    set({ rounds, selectedRound: wasAtEnd ? rounds.length - 1 : state.selectedRound });
+    const selectedRound = wasAtEnd ? rounds.length - 1 : state.selectedRound;
+    set({
+      rounds,
+      selectedRound,
+      // Decision 5. Following the head is a change of round like any other.
+      activeIssueId: selectedRound === state.selectedRound ? state.activeIssueId : null,
+    });
   },
 
   /**
@@ -163,12 +209,25 @@ export const editorStore = {
    */
   selectRound(index: number): void {
     if (!Number.isInteger(index) || index < 0 || index >= state.rounds.length) return;
-    set({ selectedRound: index });
+    // Decision 5: the highlight goes with the round it was clicked in.
+    set({ selectedRound: index, activeIssueId: null });
   },
 
   /** Choose the colour a click paints. `"."` is the eraser. */
   setActiveIndex(ch: string): void {
     set({ activeIndex: ch });
+  },
+
+  /**
+   * Highlight one issue's region on the canvas, or clear the highlight (§8).
+   *
+   * Takes the id rather than the `Issue`, so the store still holds no critique
+   * data and the dock and the canvas cannot disagree about which issue is
+   * active. `null` is the deselection, and it is a first-class argument rather
+   * than a second method.
+   */
+  selectIssue(id: string | null): void {
+    set({ activeIssueId: id });
   },
 
   setPipelineState(pipelineState: PipelineState): void {
