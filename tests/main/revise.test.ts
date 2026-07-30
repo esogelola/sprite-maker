@@ -714,6 +714,119 @@ describe("revise — numeric strings are coerced before validation", () => {
 // zero-tool-call turns — acceptance criterion 3
 // ---------------------------------------------------------------------------
 
+describe("revise — index 0", () => {
+  // Index 0 is the second falsy-zero near-miss in this project: Wave 4's
+  // `pickCriticBackground` did not count it as *used*, and returned #000000 as
+  // the "most distant" background for a black-outlined sprite. Nothing here
+  // used index 0 at all, so a `if (!index)` anywhere in the coercion would have
+  // made palette entry 0 unpaintable — and entry 0 is #000000 in pico-8 and
+  // #140c1c in db16, i.e. the outline colour of most sprites.
+  it("paints with the NUMBER 0 rather than reading it as absent", async () => {
+    const stub = createStubClient({
+      chatWithTools: [
+        calls(call("c1", "place_pixel", { x: 5, y: 7, index: 0 })),
+        calls(call("c2", "done", { summary: "outlined" })),
+      ],
+    });
+
+    const result = await revise({ client: stub }, BLANK, [ISSUE], cfg());
+
+    expect(result.grid[7]).toBe(".....0..........");
+    expect(toolMessages(stub.calls[1]?.messages)[0]?.content).not.toMatch(/error/i);
+  });
+
+  it("paints with the STRING \"0\", where the hex and decimal spellings coincide", async () => {
+    // For index 0 the two spellings are the same three bytes, unlike index 11
+    // ("b" vs "11"). That coincidence is why this case can hide: a coercion
+    // that only handles one path still passes.
+    const stub = createStubClient({
+      chatWithTools: [
+        calls(call("c1", "place_pixel", { x: 2, y: 3, index: "0" })),
+        calls(call("c2", "done", { summary: "outlined" })),
+      ],
+    });
+
+    const result = await revise({ client: stub }, BLANK, [ISSUE], cfg());
+
+    expect(result.grid[3]).toBe("..0.............");
+  });
+
+  it("clears with `\".\"` and repaints with 0, so the two are not confused", async () => {
+    // `"."` and index 0 are both "the falsy-looking one". Clearing then
+    // painting in the same run proves they take different branches.
+    const stub = createStubClient({
+      chatWithTools: [
+        calls(call("c1", "place_pixel", { x: 4, y: 4, index: 0 })),
+        calls(call("c2", "place_pixel", { x: 4, y: 4, index: "." })),
+        calls(call("c3", "place_pixel", { x: 6, y: 4, index: 0 })),
+        calls(call("c4", "done", { summary: "cleared and repainted" })),
+      ],
+    });
+
+    const result = await revise({ client: stub }, BLANK, [ISSUE], cfg());
+
+    expect(result.grid[4]).toBe("......0.........");
+  });
+
+  it("fills a row with index 0", async () => {
+    const stub = createStubClient({
+      chatWithTools: [
+        calls(call("c1", "fill_row", { y: 9, x0: 2, x1: 5, index: 0 })),
+        calls(call("c2", "done", { summary: "filled" })),
+      ],
+    });
+
+    const result = await revise({ client: stub }, BLANK, [ISSUE], cfg());
+
+    expect(result.grid[9]).toBe("..0000..........");
+  });
+});
+
+describe("revise — the per-call deadline (§6.8)", () => {
+  // The only bound this stage has against a hung model. `RecordedCall` carries
+  // no signal, so it is observed through the local probes above.
+  it("arms a FRESH signal on every turn", async () => {
+    const { client, signals } = signalProbe([
+      calls(call("c1", "place_pixel", { x: 1, y: 1, index: 1 })),
+      calls(call("c2", "place_pixel", { x: 2, y: 2, index: 1 })),
+      calls(call("c3", "done", { summary: "done" })),
+    ]);
+
+    await revise({ client }, BLANK, [ISSUE], cfg());
+
+    expect(signals).toHaveLength(3);
+    for (const s of signals) expect(s).toBeInstanceOf(AbortSignal);
+    // A shared controller would re-arm one object; a shared *signal* would fire
+    // the whole loop's deadline on the first turn's clock.
+    expect(new Set(signals).size).toBe(3);
+  });
+
+  it("aborts a turn that never settles, rather than hanging the loop", async () => {
+    await expect(
+      revise({ client: hangingClient() }, BLANK, [ISSUE], cfg({ callTimeoutMs: 40 })),
+    ).rejects.toThrow();
+  });
+
+  it("scales the deadline with canvas area, so a 64×64 gets more time than a 16×16", async () => {
+    // §6.8: callTimeoutMs × (w×h)/(32×32). A 16×16 gets a quarter of the base,
+    // a 64×64 gets four times it — a 16× spread. Inverting the scaling (÷ where
+    // × was meant) would give the large canvas a quarter and abort legitimate
+    // calls on exactly the size that needs the most room.
+    const timed = async (doc: typeof BLANK): Promise<number> => {
+      const started = performance.now();
+      await revise({ client: hangingClient() }, doc, [ISSUE], cfg({ callTimeoutMs: 40 })).catch(
+        () => undefined,
+      );
+      return performance.now() - started;
+    };
+
+    const small = await timed(BLANK); // 16×16 → 10ms
+    const large = await timed(SPRITE_64); // 64×64 → 160ms
+
+    expect(large).toBeGreaterThan(small * 2);
+  });
+});
+
 describe("revise — a turn with no tool calls", () => {
   it("counts against the cap and injects a nudge naming the three tools", async () => {
     const stub = createStubClient({
