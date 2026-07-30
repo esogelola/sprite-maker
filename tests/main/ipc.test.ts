@@ -591,7 +591,7 @@ describe("models and config", () => {
     };
 
     expect(roles).toEqual({
-      generator: "qwen3:8b",
+      generator: "qwen3-vl:8b-instruct-q4_K_M",
       critic: "qwen3-vl:8b-instruct-q4_K_M",
     });
   });

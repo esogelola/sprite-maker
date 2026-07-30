@@ -2,10 +2,11 @@
 
 An Electron desktop app that turns a natural-language prompt into pixel art.
 
-A local **Qwen 3** model drafts the sprite as rows of encoded characters; a local
-**Qwen 3 VL** vision model critiques the rendered result; a bounded agentic
-revise stage edits pixels through a small tool surface. The user gates the
-outcome and can accept any round, not just the last.
+A local **Qwen 3 VL** model drafts the sprite as a short list of shape
+operations that an interpreter draws; the same vision model then critiques the
+rendered result; a bounded agentic revise stage edits pixels through a small
+tool surface. The user gates the outcome and can accept any round, not just the
+last.
 
 Everything runs locally against [Ollama](https://ollama.com). No sprite, prompt,
 or image leaves the machine.
@@ -27,16 +28,27 @@ and the bundled palette library (`src/shared/palettes.ts`), both under test.
 - **npm**
 - **Ollama** running locally on `http://localhost:11434`
 
-### Pull the default models
+### Pull the default model
 
 ```sh
-ollama pull qwen3:8b
 ollama pull qwen3-vl:8b-instruct-q4_K_M
 ```
 
-`qwen3:8b` is the generator and `qwen3-vl:8b-instruct-q4_K_M` is the critic.
+One model, both roles: `qwen3-vl:8b-instruct-q4_K_M` is the generator **and**
+the critic. `qwen3-vl` handles text-only prompts as well as vision, so binding
+both roles to it also removes the model-swap stall between drafting and
+critiquing.
+
+**Why not a text model for the generator?** Because the text model cannot draw.
+`docs/superpowers/specs/captures/2026-07-30-generator-capability-benchmark.txt`
+records `qwen3:8b` returning a solid rectangle when asked for "8 lines of 8
+characters" — the most forgiving format available — with prompt, temperature,
+example size and palette each tested and eliminated as the cause. The same
+prompt on `qwen3-vl:8b-instruct-q4_K_M` composed a recognisable sprite.
+
 Both bindings are defaults in `DEFAULT_HARNESS_CONFIG` and are swappable at
-runtime through the model pickers once the UI lands.
+runtime through the model pickers, so `ollama pull qwen3:8b` is still worth
+having if you want to reproduce the benchmark.
 
 ## Install
 

@@ -364,15 +364,28 @@ export function filterIssues(report: CritiqueReport, cfg: HarnessConfig): Critiq
 // ---------------------------------------------------------------------------
 
 /**
- * The effective timeout for one critic call — spec §6.8, §9.
+ * The effective timeout for one critic call — spec §6.8, amendment A12, §9.
  *
- * `callTimeoutMs` is quoted for a 32×32 canvas and scales with area: a 64×64
- * sprite is four times the grid text and four times the image, so a flat limit
- * would abort legitimate calls. Floored at 1ms so a small canvas with a small
- * configured timeout still produces a signal that can fire.
+ * `max(callTimeoutFloorMs, callTimeoutMs × area / 32²)`. The area term is quoted
+ * for a 32×32 canvas: a 64×64 sprite is four times the grid text and four times
+ * the image, so a flat limit would abort legitimate calls.
+ *
+ * **The floor is the amendment**, and it is what this function was missing.
+ * Pure area scaling made the *smallest* canvas the tightest deadline — a 16×16
+ * got `120000 × 256/1024 = 30 s`, and cold-loading a 6-19 GB critic costs 8-25 s
+ * of that regardless of what it is looking at. A12 words the rule generally, so
+ * every stage that arms a per-call deadline takes the floor, not just the draft.
+ *
+ * Spelled the same way as `draftTimeoutMs` deliberately: two spellings of one
+ * amendment is how one of them ends up not having it. `callTimeoutFloorMs` is a
+ * positive int in the schema, so it also carries the old "never a zero-length
+ * deadline" guarantee that an explicit `Math.max(1, …)` used to provide here.
  */
 export function criticTimeoutMs(cfg: HarnessConfig, size: Size): number {
-  return Math.max(1, Math.round((cfg.callTimeoutMs * size.w * size.h) / BASELINE_AREA));
+  return Math.max(
+    cfg.callTimeoutFloorMs,
+    Math.round((cfg.callTimeoutMs * size.w * size.h) / BASELINE_AREA),
+  );
 }
 
 /** §6.8: a target, not a multiplier — 16×16 and 64×64 both land near 512px. */

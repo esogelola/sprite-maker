@@ -310,6 +310,36 @@ describe("generate", () => {
     expect(body.format).toBe("json");
   });
 
+  it("forwards a whole JSON Schema as format, not just the string — spec A10", async () => {
+    // A10's draft sends a schema object, and Ollama's grammar-constrained
+    // decoding is what makes an off-shape reply unrepresentable rather than
+    // merely repairable. `generateBody` always forwarded the field verbatim; the
+    // *type* said `string`, so Wave 6b had to declare a widened request type at
+    // its own boundary to describe what it was already sending. This is the
+    // assertion that says the object arrives intact and nested, not stringified.
+    const fixture = await startServer(replyJson({ response: "{}" }));
+    const schema = {
+      type: "object",
+      properties: {
+        ops: {
+          type: "array",
+          items: { type: "object", properties: { op: { enum: ["ellipse", "line"] } } },
+        },
+      },
+      required: ["ops"],
+    };
+
+    await createOllamaClient(fixture.baseUrl).generate({
+      model: "qwen3-vl:8b-instruct-q4_K_M",
+      prompt: "p",
+      format: schema,
+    });
+
+    const { body } = fixture.requests[0];
+    expect(body.format).toEqual(schema);
+    expect(typeof body.format).toBe("object");
+  });
+
   it("sends think as a top-level field, never inside options — spec A8", async () => {
     const fixture = await startServer(replyJson({ response: "rows" }));
     await createOllamaClient(fixture.baseUrl).generate({
@@ -553,6 +583,45 @@ describe("chatWithTools", () => {
       options: { temperature: 0, seed: 3 },
     });
     expect(fixture.requests[0].body.options).toEqual({ temperature: 0, seed: 3 });
+  });
+
+  it("forwards format — the string arm and the JSON Schema arm alike", async () => {
+    // `/api/chat` takes the same field as `/api/generate`. Declared and
+    // forwarded here so the widening A10 needed on the draft path does not have
+    // to be rediscovered by whichever stage wants a constrained tool argument
+    // next — the omission, not the field, is what cost Wave 6b a local type.
+    const schema = { type: "object", required: ["summary"] };
+
+    const withSchema = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(withSchema.baseUrl).chatWithTools({
+      model: "m",
+      messages: [{ role: "user", content: "u" }],
+      tools: [],
+      format: schema,
+    });
+    expect(withSchema.requests[0].body.format).toEqual(schema);
+
+    const withString = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(withString.baseUrl).chatWithTools({
+      model: "m",
+      messages: [{ role: "user", content: "u" }],
+      tools: [],
+      format: "json",
+    });
+    expect(withString.requests[0].body.format).toBe("json");
+  });
+
+  it("omits format entirely when the caller did not ask for it", async () => {
+    const fixture = await startServer(replyJson({ message: { content: "" } }));
+    await createOllamaClient(fixture.baseUrl).chatWithTools({
+      model: "m",
+      messages: [{ role: "user", content: "u" }],
+      tools: [],
+    });
+    // Not `format: undefined` and not `format: "json"`: an absent field leaves
+    // the model unconstrained, which is what every current caller of this
+    // endpoint wants.
+    expect("format" in fixture.requests[0].body).toBe(false);
   });
 
   it("sends think as a top-level field, never inside options — spec A8", async () => {
@@ -1157,6 +1226,31 @@ describe("createStubClient", () => {
         format: "json",
       },
     ]);
+  });
+
+  it("records a JSON Schema format as the object it was, with no cast to read it back", async () => {
+    // `RecordedCall.format` was typed `string` while A10's draft handed it an
+    // object: the log held the right value under a wrong type, and `draft.test.ts`
+    // read it back through a documented cast. A recording surface that has to be
+    // cast away is one nobody can assert on — the whole argument the stub's own
+    // header makes about `messages`, `options` and `images`.
+    const stub = createStubClient({
+      generate: ["{}"],
+      vision: ["{}"],
+      chatWithTools: [{ content: "", toolCalls: [] }],
+    });
+    const schema = { type: "object", properties: { ops: { type: "array" } }, required: ["ops"] };
+
+    await stub.generate({ model: "m", prompt: "p", format: schema });
+    await stub.vision({ model: "m", prompt: "p", images: [Buffer.from("x")], format: schema });
+    await stub.chatWithTools({ model: "m", messages: [], tools: [], format: schema });
+
+    for (const call of stub.calls) {
+      expect(call.format).toEqual(schema);
+      // Not `JSON.stringify(schema)` — a stringified schema is still a string
+      // and would satisfy a `toEqual` against one.
+      expect(typeof call.format).toBe("object");
+    }
   });
 
   it("leaves an unsupplied field absent rather than undefined", async () => {

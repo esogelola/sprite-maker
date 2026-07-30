@@ -179,7 +179,7 @@ describe("createHistory", () => {
     const history = createHistory("session-1", config);
 
     config.models.generator = "mutated-after-the-fact";
-    expect(history.config.models.generator).toBe("qwen3:8b");
+    expect(history.config.models.generator).toBe("qwen3-vl:8b-instruct-q4_K_M");
   });
 });
 

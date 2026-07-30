@@ -35,8 +35,11 @@ describe("createModelRegistry — roles", () => {
     const cfg = config();
     const registry = createModelRegistry(createStubClient({}), cfg);
 
+    // Both roles are bound to the same model by default since Wave 6c — the
+    // text generator could not draw (spec §3, and the committed generator
+    // capability benchmark), and `qwen3-vl` handles text-only prompts.
     expect(registry.roles()).toEqual({
-      generator: "qwen3:8b",
+      generator: "qwen3-vl:8b-instruct-q4_K_M",
       critic: "qwen3-vl:8b-instruct-q4_K_M",
     });
   });
@@ -109,7 +112,10 @@ describe("createModelRegistry — bind", () => {
     createModelRegistry(createStubClient({}), cfg).bind("critic", "qwen3-vl:32b");
 
     const reparsed = HarnessConfigSchema.parse(cfg);
-    expect(reparsed.models).toEqual({ generator: "qwen3:8b", critic: "qwen3-vl:32b" });
+    expect(reparsed.models).toEqual({
+      generator: "qwen3-vl:8b-instruct-q4_K_M",
+      critic: "qwen3-vl:32b",
+    });
   });
 
   it("replaces the models object rather than editing it in place", () => {
@@ -160,7 +166,7 @@ describe("createModelRegistry — bind", () => {
     createModelRegistry(createStubClient({}), cfg).bind("generator", "not-the-default");
 
     expect(DEFAULT_HARNESS_CONFIG.models).toEqual({
-      generator: "qwen3:8b",
+      generator: "qwen3-vl:8b-instruct-q4_K_M",
       critic: "qwen3-vl:8b-instruct-q4_K_M",
     });
   });

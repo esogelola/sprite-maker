@@ -88,13 +88,27 @@ export type OllamaOptions = Record<string, unknown> & {
   think?: "`think` is a top-level request field, not an `options` key — spec A8";
 };
 
+/**
+ * Ollama's `format` — spec §6.9, amendment A10.
+ *
+ * Two shapes, not one. `"json"` constrains the model to *valid* JSON; a JSON
+ * **Schema** object constrains it to a valid *document*, which is what A10's
+ * draft stage sends and what made row width unrepresentable rather than merely
+ * repairable. `generateBody` forwards the field verbatim, so the wire has always
+ * carried both — only the type was narrow, and Wave 6b had to declare a local
+ * `format`-widened request type at its own boundary to say what it was already
+ * sending. Widening it here is the honest fix: the object is not an escape hatch
+ * from the contract, it *is* the contract for `DRAFT`.
+ */
+export type OllamaFormat = string | Record<string, unknown>;
+
 export interface GenerateRequest {
   model: string;
   system?: string;
   prompt: string;
   options?: OllamaOptions;
-  /** `"json"` constrains the model to valid JSON. */
-  format?: string;
+  /** `"json"`, or a whole JSON Schema — see `OllamaFormat`. */
+  format?: OllamaFormat;
   /**
    * Suppress (or demand) the model's reasoning channel — spec §6.9, A8.
    *
@@ -105,7 +119,12 @@ export interface GenerateRequest {
   signal?: AbortSignal;
 }
 
-/** `generate` plus the images §4.4 requires the critic to see. */
+/**
+ * `generate` plus the images §4.4 requires the critic to see.
+ *
+ * `format` is inherited, and the critic sends `"json"` through it — the string
+ * arm and the schema arm are the same field on the same endpoint.
+ */
 export interface VisionRequest extends GenerateRequest {
   images: Buffer[];
 }
@@ -115,6 +134,13 @@ export interface ChatWithToolsRequest {
   messages: ChatMessage[];
   tools: ToolDef[];
   options?: OllamaOptions;
+  /**
+   * `"json"`, or a whole JSON Schema — see `OllamaFormat`. `/api/chat` takes the
+   * same field as `/api/generate`, and it is declared here so the widening A10
+   * needed does not have to be discovered a third time by whichever stage wants
+   * a constrained tool argument next. Omitted leaves it off the wire entirely.
+   */
+  format?: OllamaFormat;
   /** See `GenerateRequest.think`. This is the stage where it matters most. */
   think?: boolean;
   signal?: AbortSignal;
@@ -428,6 +454,7 @@ export function createOllamaClient(baseUrl: string = DEFAULT_OLLAMA_BASE_URL): O
         stream: false,
       };
       if (req.options !== undefined) body.options = req.options;
+      if (req.format !== undefined) body.format = req.format;
       // Top-level, as on `/api/generate` — the capture reproduced the same
       // result on `/api/chat`, and this is the endpoint the 40-turn revise loop
       // runs on.

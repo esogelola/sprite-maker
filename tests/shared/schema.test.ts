@@ -965,8 +965,37 @@ describe("HarnessConfigSchema", () => {
       callTimeoutFloorMs: 45000,
       maxDraftBatches: 5,
       draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
-      models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
+      models: {
+        generator: "qwen3-vl:8b-instruct-q4_K_M",
+        critic: "qwen3-vl:8b-instruct-q4_K_M",
+      },
     });
+  });
+
+  it("binds the GENERATOR to qwen3-vl, because qwen3:8b cannot draw", () => {
+    // Pinned as its own named assertion rather than left to the field-for-field
+    // comparison above, because this default is a measured finding and not a
+    // preference: `captures/2026-07-30-generator-capability-benchmark.txt`
+    // records `qwen3:8b` returning a solid rectangle for "8 lines of 8
+    // characters" — the most forgiving format there is — while
+    // `qwen3-vl:8b-instruct-q4_K_M` composed a recognisable fox from the same
+    // subject and cleared A11's gauge bar in one batch live. Reverting this
+    // binding reverts the app to a generator that cannot draw, and that must
+    // fail with a sentence saying so rather than as one line of a 13-field diff.
+    expect(DEFAULT_HARNESS_CONFIG.models.generator).toBe("qwen3-vl:8b-instruct-q4_K_M");
+    expect(DEFAULT_HARNESS_CONFIG.models.generator).not.toBe("qwen3:8b");
+    // And through the schema, which carries its own copy of the default: the
+    // two are separate literals, so one can be changed without the other.
+    expect(HarnessConfigSchema.parse({}).models.generator).toBe("qwen3-vl:8b-instruct-q4_K_M");
+    expect(HarnessConfigSchema.parse({ models: {} }).models.generator).toBe(
+      "qwen3-vl:8b-instruct-q4_K_M",
+    );
+  });
+
+  it("binds both roles to one model, so a round costs no model swap", () => {
+    // §3 predicted this as the payoff — "`qwen3-vl` also handles text-only
+    // prompts, so both roles can be bound to it to eliminate model-swap stalls".
+    expect(DEFAULT_HARNESS_CONFIG.models.generator).toBe(DEFAULT_HARNESS_CONFIG.models.critic);
   });
 
   it("DEFAULT_HARNESS_CONFIG itself round-trips through the schema", () => {
@@ -984,7 +1013,10 @@ describe("HarnessConfigSchema", () => {
 
   it("a partial models override still fills the other role", () => {
     const cfg = HarnessConfigSchema.parse({ models: { critic: "llava:13b" } });
-    expect(cfg.models).toEqual({ generator: "qwen3:8b", critic: "llava:13b" });
+    expect(cfg.models).toEqual({
+      generator: "qwen3-vl:8b-instruct-q4_K_M",
+      critic: "llava:13b",
+    });
   });
 
   it("rejects a confidenceFloor outside 0..1", () => {

@@ -377,12 +377,38 @@ export const LintReportSchema = z.strictObject({
 // 6.8 HarnessConfig
 // ---------------------------------------------------------------------------
 
+/**
+ * The role bindings — spec §3, amendment A10.
+ *
+ * **Both roles are bound to `qwen3-vl:8b-instruct-q4_K_M`.** §3 named
+ * `qwen3:8b` as the generator and noted that "`qwen3-vl` also handles text-only
+ * prompts, so both roles can be bound to it to eliminate model-swap stalls —
+ * that is a config change, not a code change." This is that config change, and
+ * the reason it is now the default rather than an option is measured:
+ * `captures/2026-07-30-generator-capability-benchmark.txt` records `qwen3:8b`
+ * returning a **solid rectangle** for "8 lines of 8 characters", the most
+ * forgiving format available, with prompt, temperature, example size and palette
+ * each eliminated as the cause. `qwen3-vl:8b-instruct-q4_K_M` composed a
+ * recognisable 5-colour fox from the same subject and palette, and cleared
+ * A11's gauge bar in one batch live
+ * (`captures/2026-07-30-wave-6b-live-draft.txt`).
+ *
+ * A text model that cannot draw is not a generator, however cheap its tokens
+ * are. The secondary win is the one §3 predicted: one 6 GB model serves both
+ * roles, so a round costs no model swap.
+ *
+ * `qwen3:8b` remains installable and bindable through §9's pickers — this is a
+ * default, not a restriction.
+ */
 const ModelsSchema = z
   .strictObject({
-    generator: z.string().min(1).default("qwen3:8b"),
+    generator: z.string().min(1).default("qwen3-vl:8b-instruct-q4_K_M"),
     critic: z.string().min(1).default("qwen3-vl:8b-instruct-q4_K_M"),
   })
-  .default({ generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" });
+  .default({
+    generator: "qwen3-vl:8b-instruct-q4_K_M",
+    critic: "qwen3-vl:8b-instruct-q4_K_M",
+  });
 
 /**
  * **Strict.** §6.8 exists so two benchmark runs can be compared, and the config
@@ -796,5 +822,9 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   callTimeoutFloorMs: 45000,
   maxDraftBatches: 5,
   draftGaugeBar: { minColours: 3, minCoverage: 0.12, maxCoverage: 0.8, minDistinctRows: 8 },
-  models: { generator: "qwen3:8b", critic: "qwen3-vl:8b-instruct-q4_K_M" },
+  // Both roles, one model — see `ModelsSchema`. `qwen3:8b` cannot draw.
+  models: {
+    generator: "qwen3-vl:8b-instruct-q4_K_M",
+    critic: "qwen3-vl:8b-instruct-q4_K_M",
+  },
 };

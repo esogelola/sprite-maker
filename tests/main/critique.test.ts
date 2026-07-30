@@ -742,9 +742,13 @@ describe("critique", () => {
     expect(second.calls).toHaveLength(2);
   });
 
-  it("arms an AbortSignal with the area-scaled callTimeoutMs — §6.8, §9", async () => {
+  it("arms an AbortSignal with the floored, area-scaled callTimeoutMs — §6.8, §9", async () => {
     const client = hangingClient();
-    const cfg = cfgWith({ callTimeoutMs: 20 }); // 16×16 scales this to 5ms
+    // Both terms dialled down, because A12 made the *floor* the operative one on
+    // a 16×16: leaving `callTimeoutFloorMs` at its 45 s default would keep this
+    // test hanging for 45 seconds and then still pass, which is the worst of
+    // both outcomes.
+    const cfg = cfgWith({ callTimeoutMs: 20, callTimeoutFloorMs: 5 });
     await expect(critique({ client }, BLACK_OUTLINE, lint(BLACK_OUTLINE), cfg)).rejects.toThrow(
       OllamaTimeoutError,
     );
@@ -753,15 +757,31 @@ describe("critique", () => {
   });
 });
 
-describe("criticTimeoutMs", () => {
-  it("scales callTimeoutMs by canvas area against the 32×32 baseline — §6.8", () => {
+describe("criticTimeoutMs — spec §6.8, amendment A12", () => {
+  it("gives a 16×16 the FLOOR, not 120000 × 256/1024", () => {
+    // The defect A12 exists to fix, and the one this stage was still carrying
+    // after Wave 6b fixed it in `draft.ts` only: pure area scaling made the
+    // *smallest* canvas the tightest deadline, and 30 s does not cover a cold
+    // load of a 6 GB critic plus a vision call.
+    expect(criticTimeoutMs(CFG, { w: 16, h: 16 })).toBe(CFG.callTimeoutFloorMs);
+    expect(criticTimeoutMs(CFG, { w: 16, h: 16 })).toBe(45000);
+    expect(criticTimeoutMs(CFG, { w: 16, h: 16 })).not.toBe(30000);
+    expect(criticTimeoutMs(CFG, { w: 16, h: 16 })).not.toBe(CFG.callTimeoutMs / 4);
+  });
+
+  it("still scales with canvas area above the floor — §6.8", () => {
     expect(criticTimeoutMs(CFG, { w: 32, h: 32 })).toBe(CFG.callTimeoutMs);
     expect(criticTimeoutMs(CFG, { w: 64, h: 64 })).toBe(CFG.callTimeoutMs * 4);
-    expect(criticTimeoutMs(CFG, { w: 16, h: 16 })).toBe(CFG.callTimeoutMs / 4);
+  });
+
+  it("honours a raised floor over a larger area term", () => {
+    expect(criticTimeoutMs(cfgWith({ callTimeoutFloorMs: 200000 }), { w: 32, h: 32 })).toBe(200000);
   });
 
   it("never returns zero", () => {
-    expect(criticTimeoutMs(cfgWith({ callTimeoutMs: 1 }), { w: 16, h: 16 })).toBeGreaterThan(0);
+    expect(
+      criticTimeoutMs(cfgWith({ callTimeoutMs: 1, callTimeoutFloorMs: 1 }), { w: 16, h: 16 }),
+    ).toBeGreaterThan(0);
   });
 });
 

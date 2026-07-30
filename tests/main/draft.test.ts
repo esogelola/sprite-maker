@@ -151,13 +151,15 @@ const CLEAN_32 = cleanRows(SIZE_32);
 const ALL_ROWS_16 = [...Array(16).keys()];
 
 /**
- * The Wave 5 stub types `RecordedCall.format` as `string`, from before A10 made
- * it a JSON Schema object. The wire is unaffected — `generateBody` forwards the
- * field verbatim — so the recorded value is read back through one cast here
- * rather than by reopening a Wave 5 deliverable.
+ * Narrows `RecordedCall.format` to the JSON Schema arm A10's draft sends.
+ *
+ * Wave 6c widened `OllamaFormat` — and with it the stub's recorded field — to
+ * `string | Record<string, unknown>`, so this is no longer casting away a wrong
+ * type; it is picking one arm of a union that genuinely has two, because
+ * `format: "json"` is still what the critic sends on the same field.
  */
-function recordedFormat(value: string | undefined): Record<string, unknown> {
-  return value as unknown as Record<string, unknown>;
+function recordedFormat(value: unknown): Record<string, unknown> {
+  return value as Record<string, unknown>;
 }
 
 /**

@@ -53,6 +53,7 @@ import type {
   ChatMessage,
   HarnessConfig,
   Issue,
+  Size,
   SpriteDoc,
   ToolCall,
   ToolDef,
@@ -352,6 +353,33 @@ function applyCall(
 }
 
 /**
+ * The per-turn deadline — spec §6.8, amendment A12.
+ *
+ * `max(callTimeoutFloorMs, callTimeoutMs × area / 32²)`. The area term is quoted
+ * per 32×32 because a 64×64 canvas is four times the pixels and four times the
+ * tokens, and one budget for both sizes either starves the large canvas or lets
+ * the small one hang.
+ *
+ * **The floor is the amendment, and this stage is the one it was measured on.**
+ * A 16×16 got `120000 × 256/1024 = 30 s`, which a real revise turn exceeds — so
+ * every 16×16 run ended `FAILED` after round 1, which was the app's first real
+ * generation (§6.8, A12). Cold-loading a 6-19 GB model costs 8-25 s of that
+ * whatever is being edited. A12 words the rule generally; the floor was applied
+ * in `draft.ts` first only because the other two stages were outside that wave's
+ * whitelist.
+ *
+ * Exported so the floor is pinned directly rather than inferred from how long a
+ * hanging client takes to abort: `RecordedCall` carries no signal, so the loop's
+ * own deadline is otherwise only observable through wall clock.
+ */
+export function reviseTimeoutMs(cfg: HarnessConfig, size: Size): number {
+  return Math.max(
+    cfg.callTimeoutFloorMs,
+    Math.round((cfg.callTimeoutMs * size.w * size.h) / TIMEOUT_REFERENCE_AREA),
+  );
+}
+
+/**
  * Run the agent over `doc` until it calls `done` or runs out of turns.
  *
  * The contract the pipeline depends on: this **never** throws for anything the
@@ -374,14 +402,9 @@ export async function revise(
     { role: "user", content: buildRevisePrompt(doc, issues, grid) },
   ];
 
-  // §6.8: `callTimeoutMs` is quoted per 32x32 and scaled by area at the call
-  // site. This is a call site — a 64x64 canvas is four times the pixels and
-  // four times the tokens, and one budget for both sizes either starves the
-  // large canvas or lets the small one hang.
-  const timeoutMs = Math.max(
-    1,
-    Math.round((cfg.callTimeoutMs * doc.size.w * doc.size.h) / TIMEOUT_REFERENCE_AREA),
-  );
+  // §6.8 / A12 — see `reviseTimeoutMs`. This is a call site, and the floor
+  // matters most here: 30 s was measured to be less than one revise turn.
+  const timeoutMs = reviseTimeoutMs(cfg, doc.size);
 
   let turns = 0;
   let doneSummary: string | undefined;

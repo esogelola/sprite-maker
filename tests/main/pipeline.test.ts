@@ -266,9 +266,36 @@ describe("run — config", () => {
     expect(history.rounds).toHaveLength(2);
     expect(history.stopReason).toBe("round-cap");
     expect(history.config).toEqual(cfg({ maxRounds: 2 }));
-    expect(stub.calls[0].model).toBe("qwen3:8b");
+    // Since Wave 6c both roles default to the same model, so these two lines no
+    // longer tell the generator binding apart from the critic binding — what
+    // they still prove is that a *binding reached the stages at all*, which is
+    // what the missing re-parse destroyed (`models: undefined` → a call with no
+    // model). The role-vs-role distinction is asserted below, off an explicit
+    // config, where the two names differ on purpose.
+    expect(stub.calls[0].model).toBe("qwen3-vl:8b-instruct-q4_K_M");
     expect(stub.calls[1].model).toBe("qwen3-vl:8b-instruct-q4_K_M");
-    expect(history.rounds[1].doc.meta.generatorModel).toBe("qwen3:8b");
+    expect(history.rounds[1].doc.meta.generatorModel).toBe("qwen3-vl:8b-instruct-q4_K_M");
+  });
+
+  it("sends each stage its OWN role binding, not one model for both", async () => {
+    // Kept as a live assertion now that the two defaults coincide: a stage
+    // reading the wrong role would be invisible against the default config, and
+    // this is the run's only proof that `generate` takes `models.generator` and
+    // `vision` takes `models.critic`.
+    const { deps, stub } = harness({ generate: [draftReply()], vision: [CONVERGED] });
+
+    const history = await run(
+      deps,
+      INPUT,
+      cfg({ models: { generator: "gen-only:1b", critic: "critic-only:1b" } }),
+    );
+
+    expect(stub.calls[0].method).toBe("generate");
+    expect(stub.calls[0].model).toBe("gen-only:1b");
+    expect(stub.calls[1].method).toBe("vision");
+    expect(stub.calls[1].model).toBe("critic-only:1b");
+    expect(history.rounds[0].doc.meta.generatorModel).toBe("gen-only:1b");
+    expect(history.rounds[0].doc.meta.criticModel).toBe("critic-only:1b");
   });
 });
 

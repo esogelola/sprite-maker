@@ -16,9 +16,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChatWithToolsRequest, OllamaClient } from "@main/ollama";
-import { REVISE_TOOLS, revise } from "@main/revise";
+import { REVISE_TOOLS, revise, reviseTimeoutMs } from "@main/revise";
 import { createStubClient, type StubClient } from "../stubs/ollama";
-import { HarnessConfigSchema, type ChatMessage, type ChatTurn, type Issue, type ToolCall } from "@shared/schema";
+import { DEFAULT_HARNESS_CONFIG, HarnessConfigSchema, type ChatMessage, type ChatTurn, type Issue, type ToolCall } from "@shared/schema";
 import { BLANK, SPRITE_32, SPRITE_64 } from "../fixtures/sprites";
 
 // ---------------------------------------------------------------------------
@@ -802,21 +802,29 @@ describe("revise — the per-call deadline (§6.8)", () => {
   });
 
   it("aborts a turn that never settles, rather than hanging the loop", async () => {
+    // The floor has to come down with the base: A12 makes `callTimeoutFloorMs`
+    // the operative term on a 16×16, so leaving it at 45 s would make this test
+    // take 45 seconds and still pass.
     await expect(
-      revise({ client: hangingClient() }, BLANK, [ISSUE], cfg({ callTimeoutMs: 40 })),
+      revise(
+        { client: hangingClient() },
+        BLANK,
+        [ISSUE],
+        cfg({ callTimeoutMs: 40, callTimeoutFloorMs: 1 }),
+      ),
     ).rejects.toThrow();
   });
 
   it("scales the deadline with canvas area, so a 64×64 gets more time than a 16×16", async () => {
-    // §6.8: callTimeoutMs × (w×h)/(32×32). A 16×16 gets a quarter of the base,
+    // §6.8: callTimeoutMs × (w×h)/(32×32), with the floor held below both so the
+    // area term is what is being observed. A 16×16 gets a quarter of the base,
     // a 64×64 gets four times it — a 16× spread. Inverting the scaling (÷ where
     // × was meant) would give the large canvas a quarter and abort legitimate
     // calls on exactly the size that needs the most room.
+    const scaling = cfg({ callTimeoutMs: 40, callTimeoutFloorMs: 1 });
     const timed = async (doc: typeof BLANK): Promise<number> => {
       const started = performance.now();
-      await revise({ client: hangingClient() }, doc, [ISSUE], cfg({ callTimeoutMs: 40 })).catch(
-        () => undefined,
-      );
+      await revise({ client: hangingClient() }, doc, [ISSUE], scaling).catch(() => undefined);
       return performance.now() - started;
     };
 
@@ -824,6 +832,62 @@ describe("revise — the per-call deadline (§6.8)", () => {
     const large = await timed(SPRITE_64); // 64×64 → 160ms
 
     expect(large).toBeGreaterThan(small * 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reviseTimeoutMs — spec §6.8, amendment A12
+//
+// The floor was measured on THIS stage: a 16×16 got `120000 × 256/1024 = 30 s`
+// per call, which a real revise turn exceeds, so every 16×16 run ended FAILED
+// after round 1. Wave 6b applied the floor in `draft.ts` alone, because the
+// other two stages were outside its whitelist — so the stage the amendment was
+// written about was the last one to get it.
+// ---------------------------------------------------------------------------
+
+describe("reviseTimeoutMs", () => {
+  it("gives a 16×16 the FLOOR, not 120000 × 256/1024", () => {
+    expect(reviseTimeoutMs(cfg(), { w: 16, h: 16 })).toBe(DEFAULT_HARNESS_CONFIG.callTimeoutFloorMs);
+    expect(reviseTimeoutMs(cfg(), { w: 16, h: 16 })).toBe(45000);
+    expect(reviseTimeoutMs(cfg(), { w: 16, h: 16 })).not.toBe(30000);
+  });
+
+  it("still scales with canvas area above the floor", () => {
+    expect(reviseTimeoutMs(cfg(), { w: 32, h: 32 })).toBe(120000);
+    expect(reviseTimeoutMs(cfg(), { w: 64, h: 64 })).toBe(480000);
+  });
+
+  it("honours a raised floor over a larger area term", () => {
+    expect(reviseTimeoutMs(cfg({ callTimeoutFloorMs: 200000 }), { w: 32, h: 32 })).toBe(200000);
+  });
+
+  it("never returns a zero-length deadline", () => {
+    expect(
+      reviseTimeoutMs(cfg({ callTimeoutMs: 1, callTimeoutFloorMs: 1 }), { w: 16, h: 16 }),
+    ).toBeGreaterThan(0);
+  });
+
+  it("is the deadline the loop actually arms, not a second copy of the rule", async () => {
+    // The exported function would be worth nothing if `revise` still computed
+    // its own: `RecordedCall` carries no signal, so a drifted call site would be
+    // invisible to every assertion above. A 16×16 with the base at 40ms and the
+    // floor at 1ms takes the area term (10ms); with the floor raised to 400ms it
+    // must take the floor — and therefore outlive the first by a wide margin.
+    const timed = async (floorMs: number): Promise<number> => {
+      const started = performance.now();
+      await revise(
+        { client: hangingClient() },
+        BLANK,
+        [ISSUE],
+        cfg({ callTimeoutMs: 40, callTimeoutFloorMs: floorMs }),
+      ).catch(() => undefined);
+      return performance.now() - started;
+    };
+
+    const scaled = await timed(1); // 16×16 → 10ms
+    const floored = await timed(400); // floor wins → 400ms
+
+    expect(floored).toBeGreaterThan(scaled * 4);
   });
 });
 

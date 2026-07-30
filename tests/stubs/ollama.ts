@@ -47,6 +47,7 @@ import type {
   ChatWithToolsRequest,
   GenerateRequest,
   OllamaClient,
+  OllamaFormat,
   VisionRequest,
 } from "@main/ollama";
 import type { ChatMessage, ChatTurn, ToolDef } from "@shared/schema";
@@ -68,7 +69,16 @@ export interface RecordedCall {
   messages?: ChatMessage[];
   tools?: ToolDef[];
   options?: Record<string, unknown>;
-  format?: string;
+  /**
+   * `"json"` **or a JSON Schema object** — `OllamaFormat`, spec §6.9 / A10.
+   *
+   * Typed `string` until Wave 6c, which is a recording surface that lied: A10's
+   * draft sends a schema object, the stub stored the object, and the declared
+   * type said `string`. `draft.test.ts` read it back through a documented cast —
+   * which works, and which also means a future test asserting on the recorded
+   * schema would have started by casting away the only type that was wrong.
+   */
+  format?: OllamaFormat;
   /**
    * The A8 suppression flag, recorded because the plan pins both Wave 6's and
    * Wave 8's assertion as "assert on the stub's recorded call, not on the prompt
@@ -244,6 +254,9 @@ export function createStubClient(script: StubScript): StubClient {
         tools: [...req.tools],
       };
       if (req.options !== undefined) call.options = { ...req.options };
+      // Recorded for the same reason `generate`'s is: a field the request can
+      // carry and the log cannot is a field no test can assert on.
+      if (req.format !== undefined) call.format = req.format;
       if (req.think !== undefined) call.think = req.think;
       record(call);
       return copyTurn(unwrap(chatQueue.next()));
