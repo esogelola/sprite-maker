@@ -79,7 +79,7 @@ Two limits on that, both found by the audit:
 | 6 | `src/main/draft.ts`, `src/main/prompts/draft.ts`, `tests/main/draft.test.ts` | `tests/stubs/ollama.ts` |
 | 7 | `src/main/critique.ts`, `src/main/prompts/critique.ts`, `tests/main/critique.test.ts` | `tests/stubs/ollama.ts` |
 | 8 | `src/main/revise.ts`, `src/main/prompts/revise.ts`, `tests/main/revise.test.ts` | `tests/stubs/ollama.ts`, `src/main/ollama.ts` |
-| 9 | `src/main/history.ts`, `src/main/pipeline.ts`, `tests/main/pipeline.test.ts`, `tests/main/history.test.ts` | `tests/stubs/ollama.ts`, `src/main/draft.ts`, `tests/main/draft.test.ts`, `tests/main/revise.test.ts` (step 9.7 only) |
+| 9 | `src/main/history.ts`, `src/main/pipeline.ts`, `tests/main/pipeline.test.ts`, `tests/main/history.test.ts` | `tests/stubs/ollama.ts`, `src/main/draft.ts`, `tests/main/draft.test.ts`,  |
 | 10 | `src/main/index.ts`, `src/main/ipc.ts`, `src/preload/index.ts`, `src/renderer/index.html`, `src/renderer/main.tsx`, `src/renderer/App.tsx`, `tests/main/ipc.test.ts`, `playwright.config.ts`, `e2e/boot.spec.ts` | `package.json`, `electron.vite.config.ts` |
 | 11 | `src/renderer/components/Canvas.tsx`, `src/renderer/components/PaletteBar.tsx`, `src/renderer/state/store.ts`, `tests/renderer/Canvas.test.tsx`, `e2e/canvas.spec.ts` | `src/renderer/App.tsx`, `package.json` |
 | 12 | `src/renderer/components/PromptBar.tsx`, `CritiqueDock.tsx`, `Filmstrip.tsx`, `GateBar.tsx`, `StatusBar.tsx`, `ModelPickers.tsx`, `e2e/loop.spec.ts` | `src/renderer/App.tsx`, `src/renderer/state/store.ts`, `src/renderer/components/Canvas.tsx` |
@@ -603,13 +603,9 @@ Plus: `run()` calls `HarnessConfigSchema.parse(cfg)` on entry; the draft is roun
 - [ ] **9.3** Run. FAIL. **9.4** Implement `history.ts` then `pipeline.ts`. **9.5** Run. PASS.
 - [ ] **9.6** Save the happy-path event trace to `captures/2026-07-28-wave-9-event-trace.txt`.
 
-- [ ] **9.7 — inherited from Wave 8, close these three.** Wave 8 was approved with three surviving mutants its reviewer flagged as having real live consequences; the fix agent was killed mid-run by an API outage and they were never landed. All three are **tests-only** additions to `tests/main/revise.test.ts` against a source file two reviewers verified correct on every escaping input — do not modify `src/main/revise.ts`.
+- [x] **9.7 — inherited from Wave 8. DONE in `56f6189`, before Wave 9 dispatched.** Wave 8's three surviving mutants are closed and `tests/main/revise.test.ts` is **no longer in this wave's row**. Recorded here because the falsy-zero finding generalizes:
 
-  1. **`index: 0` is used by no test in the file.** Under any falsy check, palette entry 0 becomes unpaintable — and index 0 is `#000000` in pico-8, the standard outline colour. This is the *second* falsy-zero near-miss in the project (Wave 4's `pickCriticBackground` did not count index 0 as used), so treat it as a known class. Test all three accepted spellings: number `0`, string `"0"`, hex char `"0"`.
-  2. **`place_pixel`'s `"."` schema branch is pinned by nothing** — mutating `index` to `{type: "integer"}` survives, and a schema-obedient model could then never clear a pixel. Assert on `REVISE_TOOLS` and behaviourally.
-  3. **The per-call `AbortSignal.timeout` has zero tests** — it is the stage's only bound against a hung model, and inverting the area scaling gives a 64×64 doc ¼ the budget instead of 4×. Assert a fresh signal per turn and the §6.8 scaling.
-
-  Prove each with its mutant RED, then restore. `tests/main/revise.test.ts` is in this wave's row for this purpose only.
+  **Falsy zero is a named defect class in this codebase, not a coincidence.** It has now near-missed twice — Wave 4's `pickCriticBackground` did not count index 0 as *used* (returning `#000000` as the most-distant background for a black-outlined sprite, i.e. spec §4.5's vanishing silhouette reintroduced by the function written to prevent it), and Wave 8's `place_pixel` would have treated `index: 0` as absent under any falsy check. Index 0 is `#000000` in pico-8 and `#140c1c` in db16 — the outline colour of most sprites, so it is the *worst* entry to lose. **Every later wave should probe it explicitly:** any code branching on a palette index, a round number, a coordinate, a turn count or a length needs a zero case.
 
 - [ ] **9.8** Commit.
 
