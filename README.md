@@ -14,7 +14,7 @@ You type *"a dog standing"*. A local Qwen 3 VL model composes the sprite as **8�
 
 ## Honest status
 
-**Waves 1–12 of 14 are shipped.** 1501 tests, `tsc` clean, the app builds and boots.
+**Waves 1–12 of 14 are shipped.** 1579 tests, `tsc` clean, the app builds and boots.
 
 It works as **generate → judge → keep**. It does not work as **iterate**, and that is measured rather than suspected:
 
@@ -40,11 +40,50 @@ npm run build && npm run dev
 `qwen3-vl:8b` is bound to **both** roles by default — it drafts and it critiques. That is deliberate: it keeps one 6 GB model resident instead of thrashing two, and the critic's diagnosis is already good. A `qwen3:8b` text model **cannot** draw pixel art at all (measured — it returns solid rectangles), which is why the vision model does both jobs.
 
 ```bash
-npm test          # 1501 unit tests, no model required
+npm test          # 1579 unit tests, no model required
 npm run typecheck
 npm run e2e       # Playwright against a built app + live Ollama
 npm run test:live # opt-in, hits real models
 ```
+
+### Providers
+
+Ollama is the default. **LM Studio** works too — it speaks the OpenAI API, and
+`src/main/lmstudio.ts` translates:
+
+```bash
+SPRITE_MAKER_PROVIDER=lmstudio npm run dev             # http://127.0.0.1:1234
+SPRITE_MAKER_PROVIDER=lmstudio LMSTUDIO_BASE_URL=http://192.168.1.20:1234 npm run dev
+```
+
+`SPRITE_MAKER_PROVIDER` is `ollama` (default) or `lmstudio`; anything else fails
+at startup rather than quietly falling back. Each provider reads its own base URL
+— `OLLAMA_BASE_URL` or `LMSTUDIO_BASE_URL` — and whatever you supply is used
+verbatim, so a hostname, an IPv6 literal or another machine on the LAN all work.
+
+**The LM Studio provider is unverified against a live LM Studio instance.** It
+was built and tested against a local HTTP server that records the exact request
+body, plus probes against Ollama's own OpenAI-compatible `/v1` endpoint. Nobody
+has yet run this app end to end with LM Studio actually serving the model. Three
+caveats, in descending order of how likely they are to bite:
+
+- **Grammar-constrained decoding is the thinnest part of the translation.** A
+  JSON Schema goes to `response_format: {type: "json_schema", …, strict: true}`,
+  which llama.cpp converts to a GBNF grammar. The mechanism was confirmed working
+  over an OpenAI endpoint — but the draft stage's schema is an `anyOf` over five
+  `const`-tagged variants, and that specific shape has not been run through the
+  converter. If drafts come back off-shape under LM Studio, this is the first
+  place to look.
+- **`think: false` becomes `reasoning_effort: "none"`.** Measured equivalent to
+  Ollama's native field (82 tokens vs 600 unsuppressed, identical content) —
+  but measured on Ollama's `/v1`, not on LM Studio's. `"low"` does **not**
+  suppress; only `"none"` does. Servers that do not implement the field ignore
+  it, so the failure mode is a slow run, not a broken one.
+  ([capture](docs/superpowers/specs/captures/2026-07-30-reasoning-suppression-openai.txt))
+- **The default model cannot reason anyway.** `qwen3-vl:8b-instruct-q4_K_M` is
+  bound to both roles and answers a thinking request with HTTP 400 — the whole
+  `think` question is a no-op on the shipped configuration, and matters only if
+  you bind a hybrid model like `qwen3:8b`.
 
 ## How it is built
 
@@ -57,7 +96,7 @@ src/renderer/  canvas · palette bar · filmstrip · critique dock · gate bar
 
 Three boundaries carry the design:
 
-- **`main/ollama.ts` is the only place HTTP happens.** Every other module takes a client interface, which is what makes the whole pipeline testable against a scripted stub with no model running.
+- **HTTP happens in two files and nowhere else** — `main/ollama.ts` and `main/lmstudio.ts`, both behind one `LlmClient` interface. Every other module takes that interface, which is what makes the whole pipeline testable against a scripted stub with no model running, and what made adding a second provider a new file rather than a refactor.
 - **`shared/grid.ts` is pure and is the only writer of pixels.** An agent's `place_pixel` and a user's mouse click hit identical, identically-tested validation.
 - **The harness owns control flow; the model owns content.** Round sequencing, stop conditions and the regression guard are deterministic code. What to draw, and what is wrong with it, are the model's.
 

@@ -510,6 +510,35 @@ Errors: `OllamaUnreachableError(endpoint)`, `OllamaTimeoutError(model, elapsedMs
 
 `OllamaHttpError` covers any non-2xx. Nothing branches on it — it exists because *something* must be thrown, and a bare `Error` would discard the status and endpoint that §9's "bound model not installed" row requires the message to name. On a 404 the message includes the `ollama pull <model>` command that fixes it.
 
+**Amendment A15 — the contract is `LlmClient`, and LM Studio is the second implementation of it.** §13's deferred item 4 ("hosted model adapters behind the existing client interface") was the design's own bet that this boundary would hold. It held: a second provider is one new file, one new selector, and no change to `draft`, `critique`, `revise`, `pipeline`, `ipc` or `models`. The interface is renamed `LlmClient` because it describes a capability — four calls against a model — and not a vendor; `OllamaClient` remains as a deprecated alias so the rename did not have to touch nine files in the commit that added the provider.
+
+`main/provider.ts` is the one construction site. `SPRITE_MAKER_PROVIDER` is `ollama` (default, and the only provider verified end to end) or `lmstudio`; each reads its own base URL from `OLLAMA_BASE_URL` or `LMSTUDIO_BASE_URL`, passed through verbatim so a hostname, an IPv6 literal or a LAN address survives. **An unrecognised value throws at startup.** A run that silently used Ollama when the user asked for something else would produce real numbers attributed to the wrong provider, which is worse than not starting.
+
+LM Studio speaks OpenAI, so `main/lmstudio.ts` translates: `system`+`prompt` into `messages` (system **omitted**, never sent as `""`), the `options` bag onto top-level `temperature` / `seed` / `max_tokens`, `format` into `response_format` (`"json"` → `json_object`; a schema → `json_schema` with `strict: true`), `images` into a `content` array of `data:image/png;base64,…` URIs, and `tool_calls` into the same nesting with `arguments` **stringified** and `type: "function"` added. Everything on the Ollama path is unchanged.
+
+**`think: false` becomes the top-level `reasoning_effort: "none"`.** A8 established that only the native top-level field suppresses; A15 establishes its OpenAI equivalent, measured against Ollama's own `/v1` endpoint on `qwen3:8b-q4_K_M` at temperature 0 (capture: `captures/2026-07-30-reasoning-suppression-openai.txt`):
+
+| Method | generated tokens | ms |
+|---|---|---|
+| native `think: false` (reference) | 82 | 2551 |
+| no suppression | 600 | 24472 |
+| **`reasoning_effort: "none"`** | **82** | **3340** |
+| `reasoning_effort: "low"` | 600 | 24402 |
+| `/no_think` prefix | 204 — worse than nothing | — |
+| `chat_template_kwargs: { enable_thinking: false }` | 180 — no effect | — |
+| top-level `think: false` over `/v1` | 180 — no effect | — |
+
+Content was byte-identical to the reference. As in A8, most spellings that read as correct do nothing — four of the six alternatives above are inert — so the mapping is one line of code and a table of evidence. **`"low"` does not suppress**; this is not a scale to tune. An assistant prefill of an empty `<think>` block also suppresses on a hybrid model but was rejected: on the non-thinking VL model it made output *worse* (34 tokens vs 13), because the model answers the injected block. `think: true` and an omitted `think` both send no field, leaving the server default in force.
+
+Two facts qualify all of this and belong in the record:
+
+- **The model this app actually ships cannot reason at all.** `qwen3-vl:8b-instruct-q4_K_M` — bound to both roles by default — answers native `think: true` with HTTP 400, *"does not support thinking"*. A8's 86× was measured on `qwen3:8b`, which §3 later abandoned because it cannot draw. So on the shipped configuration `think` is a no-op on **both** providers, and A8's saving is currently theoretical. It matters again the moment anyone binds a hybrid generator. A side effect: `tests/live/smoke.test.ts`'s A8 control assertion — "a model with no suppression produces some `thinking`" — now fails against the default model, exactly as its own comment predicted it would when the model's defaults changed. That failure pre-dates this amendment and is a stale test, not a regression.
+- **Suppressing reasoning costs accuracy where reasoning was the point.** The same constrained prompt returned the right answer with reasoning on and the wrong one under `"none"`. §7.4 already runs draft and revise with `think: false` and A10's benchmark was taken that way, so this is a documented trade — and it is the reason `think` stays a per-stage choice rather than becoming a client-wide setting.
+
+**The error classes are shared, and their names now read wrong.** `OllamaUnreachableError` / `OllamaTimeoutError` / `OllamaHttpError` describe *transport*, not a vendor, and both clients throw them: forking a parallel hierarchy would give §9's IPC envelope two vocabularies to flatten and §8's status bar two shapes to render. What is **not** shared is the wording. Each client supplies a `ProviderIdentity`, so an LM Studio failure reads *"LM Studio is unreachable at http://…:1234/v1/models"* with a hint naming `LMSTUDIO_BASE_URL`, and a 404 suggests loading the model in LM Studio rather than an `ollama pull` command the user cannot run. The message is load-bearing beyond aesthetics: §6.7 flattens errors to one string, so after a reload it is the *only* diagnostic left. Renaming the classes is deferred — it touches every consumer and belongs in its own commit.
+
+**What is not yet known.** No live LM Studio instance has run this. The wire format is pinned by a local HTTP server that records the received body, and the `reasoning_effort` and `response_format` behaviours were probed against Ollama's OpenAI-compatible endpoint — which is *an* OpenAI implementation, not LM Studio's. Specifically unverified: that LM Studio accepts these bodies at all; that `strict: true` enforces **A10's draft schema**, an `anyOf` over five `const`-tagged variants, through llama.cpp's GBNF converter (the mechanism was confirmed working on a simple schema, the shape that matters was not); that LM Studio implements `reasoning_effort`; that its `/v1/models` ids are usable as `model` values in the same session; and that a 40-turn revise loop survives it. First failure to look for is an off-shape draft.
+
 ---
 
 ## 7. Pipeline and control flow

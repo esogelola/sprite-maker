@@ -34,7 +34,8 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, app, shell } from "electron";
 
 import { registerIpc } from "@main/ipc";
-import { createOllamaClient } from "@main/ollama";
+import type { LlmClient } from "@main/ollama";
+import { createLlmClient } from "@main/provider";
 import { HarnessConfigSchema } from "@shared/schema";
 
 /** Relative to `out/main/`, which is where this file runs from once built. */
@@ -95,8 +96,26 @@ function createWindow(): BrowserWindow {
 }
 
 void app.whenReady().then(() => {
+  // `SPRITE_MAKER_PROVIDER`, defaulting to Ollama — spec A15. An unknown value
+  // must stop the app rather than start it against a provider the user did not
+  // ask for, and **a throw is not how you stop an Electron app**: Electron
+  // downgrades an unhandled rejection to a warning, so the process stays alive
+  // with no window, no dock icon and the message buried among GPU logs. That is
+  // exactly the state the `window-all-closed` handler below exists to prevent,
+  // and it hangs the next `_electron.launch()`. Measured, not assumed.
+  let client: LlmClient;
+  try {
+    client = createLlmClient(process.env);
+  } catch (error) {
+    // Alone on stderr and unadorned, because this is the whole of what the user
+    // gets: no window is ever created, so there is no status bar to route it to.
+    console.error(`\n${error instanceof Error ? error.message : String(error)}\n`);
+    app.exit(1);
+    return;
+  }
+
   registerIpc({
-    client: createOllamaClient(process.env.OLLAMA_BASE_URL),
+    client,
     config,
     // Outside the repo on purpose: sessions are user data, not build output, and
     // §9 has one written after every round.
