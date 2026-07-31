@@ -63,7 +63,9 @@ export function PromptBar({
   const disabled = busy || blocked !== null || prompt.trim().length === 0;
 
   return (
-    <div style={styles.bar}>
+    // `data-testid` on the bar itself so evidence can photograph the row rather
+    // than the whole 1280×840 editor — `e2e/provider.spec.ts` (A16).
+    <div data-testid="prompt-bar" style={styles.bar}>
       <input
         data-testid="prompt"
         style={styles.input}

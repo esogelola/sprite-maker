@@ -128,6 +128,16 @@ import type { ChatMessage, ChatTurn } from "@shared/schema";
 export const DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234";
 
 /**
+ * Where `listModels` asks, and — amendment A16 — where detection probes.
+ *
+ * The counterpart of `OLLAMA_MODELS_PATH`, and the reason detection can tell the
+ * two providers apart at all: `/api/tags` and `/v1/models` are what each server
+ * already answers, so a 200 here is LM Studio and a 200 there is Ollama without
+ * either of them having to identify itself.
+ */
+export const LMSTUDIO_MODELS_PATH = "/v1/models";
+
+/**
  * How LM Studio names itself in the errors a user reads — spec A15.
  *
  * The classes are shared with the Ollama path because they describe transport;
@@ -433,7 +443,7 @@ export function createLmStudioClient(
   // `DEFAULT_LMSTUDIO_BASE_URL`; a LAN address or an IPv6 literal is a choice,
   // not a mistake to correct.
   const root = baseUrl.replace(/\/+$/, "");
-  const modelsEndpoint = `${root}/v1/models`;
+  const modelsEndpoint = `${root}${LMSTUDIO_MODELS_PATH}`;
   const chatEndpoint = `${root}/v1/chat/completions`;
   const onUnsupported = clientOptions.onUnsupported ?? warnOncePerCapability();
 

@@ -34,8 +34,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, app, shell } from "electron";
 
 import { registerIpc } from "@main/ipc";
-import type { LlmClient } from "@main/ollama";
-import { createLlmClient } from "@main/provider";
+import { createProviderControl, detectProvider, type ProviderResolution } from "@main/provider";
 import { HarnessConfigSchema } from "@shared/schema";
 
 /** Relative to `out/main/`, which is where this file runs from once built. */
@@ -95,27 +94,48 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
-void app.whenReady().then(() => {
-  // `SPRITE_MAKER_PROVIDER`, defaulting to Ollama — spec A15. An unknown value
-  // must stop the app rather than start it against a provider the user did not
-  // ask for, and **a throw is not how you stop an Electron app**: Electron
-  // downgrades an unhandled rejection to a warning, so the process stays alive
-  // with no window, no dock icon and the message buried among GPU logs. That is
-  // exactly the state the `window-all-closed` handler below exists to prevent,
-  // and it hangs the next `_electron.launch()`. Measured, not assumed.
-  let client: LlmClient;
+void app.whenReady().then(async () => {
+  // The provider — spec A15 and A16. **Two failures, and they are opposites.**
+  //
+  // An unknown `SPRITE_MAKER_PROVIDER` must stop the app rather than start it
+  // against a provider the user did not ask for; a typo in a variable cannot be
+  // corrected from inside an app that already started against the wrong server.
+  // **A throw is not how you stop an Electron app**: Electron downgrades an
+  // unhandled rejection to a warning, so the process stays alive with no window,
+  // no dock icon and the message buried among GPU logs — exactly the state the
+  // `window-all-closed` handler below exists to prevent, and it hangs the next
+  // `_electron.launch()`. Measured, not assumed.
+  //
+  // **Detection finding nothing is not fatal.** It keeps the default provider,
+  // records the diagnostic, and boots — because the fix is the provider row, and
+  // refusing to start would mean editing an environment variable to reach the
+  // settings that replace the environment variable. The error reaches the user
+  // through `getProvider`, which the row reads on mount.
+  //
+  // Awaited before the window is created so the renderer's first `getProvider`
+  // has an answer. The whole sweep is bounded by one `PROBE_TIMEOUT_MS` — both
+  // probes run concurrently — so the worst case here is a pause, not a hang.
+  let resolution: ProviderResolution;
   try {
-    client = createLlmClient(process.env);
+    resolution = await detectProvider(process.env);
   } catch (error) {
     // Alone on stderr and unadorned, because this is the whole of what the user
     // gets: no window is ever created, so there is no status bar to route it to.
+    // `detectProvider` throws `UnknownProviderError` and nothing else — every
+    // other outcome, including finding no server at all, resolves.
     console.error(`\n${error instanceof Error ? error.message : String(error)}\n`);
     app.exit(1);
     return;
   }
 
+  if (resolution.error !== null) {
+    // Logged as well as surfaced: a user who launched from a terminal should not
+    // have to open the app to find out it could not find their server.
+    console.error(`\n[sprite-maker] ${resolution.error}\n`);
+  }
+
   registerIpc({
-    client,
+    provider: createProviderControl(resolution),
     config,
     // Outside the repo on purpose: sessions are user data, not build output, and
     // §9 has one written after every round.

@@ -70,6 +70,17 @@ import type { ChatMessage, ChatTurn, ToolCall, ToolDef } from "@shared/schema";
  */
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
+/**
+ * Where `listModels` asks, and — amendment A16 — where detection probes.
+ *
+ * Exported so the probe reuses the path this client already speaks rather than
+ * inventing a second health endpoint that nobody would notice had rotted. A
+ * dedicated `/health` would be one more thing to keep true about a server this
+ * project does not own; the listing call is the one request whose success
+ * already means "the model server is there and answering".
+ */
+export const OLLAMA_MODELS_PATH = "/api/tags";
+
 /** How much of an unexpected error body is worth carrying in a message. */
 const MAX_ERROR_BODY = 400;
 
@@ -527,7 +538,7 @@ export function createOllamaClient(baseUrl: string = DEFAULT_OLLAMA_BASE_URL): O
 
   return {
     async listModels(): Promise<string[]> {
-      const endpoint = `${root}/api/tags`;
+      const endpoint = `${root}${OLLAMA_MODELS_PATH}`;
       const payload = await jsonRequest(endpoint, "", undefined, { method: "GET" });
       const models = payload.models;
       if (!Array.isArray(models)) {

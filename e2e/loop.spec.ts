@@ -64,6 +64,19 @@ import {
   type Page,
 } from "@playwright/test";
 
+/**
+ * Which server this spec talks to, and the model loaded into it — A16.
+ *
+ * `e2e/provider.ts` resolves the provider by calling the app's own
+ * `detectProvider`, so the warm-up lands wherever the app is about to look
+ * rather than at a hardcoded `127.0.0.1:11434`. It also asserts the resolved
+ * server actually has `MODEL`, which is what keeps the warm-up from being a
+ * silent no-op on a machine running LM Studio — where the same weights are
+ * published under a different id.
+ */
+
+import { warmModel } from "./provider";
+
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const shot = (name: string): string =>
@@ -164,29 +177,6 @@ interface BridgedApi {
 }
 
 /**
- * Load the generator into Ollama before the app starts.
- *
- * Fixture setup, not the thing under test — and run before `electron.launch`,
- * because a model load is minutes of heavy memory pressure and holding an idle
- * Electron app open across it cost `boot.spec.ts` a renderer.
- */
-async function warmModel(): Promise<void> {
-  const ollama = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
-  const response = await fetch(`${ollama}/api/generate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      prompt: "hi",
-      stream: false,
-      think: false,
-      options: { num_predict: 1 },
-    }),
-  });
-  expect(response.ok, `could not reach Ollama at ${ollama} to warm ${MODEL}`).toBe(true);
-}
-
-/**
  * Wait until the pipeline is back at the gate, capturing the mid-loop view once.
  *
  * "Back at the gate" is a settled `data-state` **and** a re-enabled Generate:
@@ -279,7 +269,7 @@ test("drives a real loop from an empty window to an accepted round", async () =>
 
 /** One cold boot: empty state, generate, inspect, scrub back, accept, capture. */
 async function runOnce(attempt: number): Promise<number> {
-  await warmModel();
+  const resolved = await warmModel(MODEL);
   await mkdir(dirname(shot("empty")), { recursive: true });
 
   let app: ElectronApplication | undefined;
@@ -471,8 +461,9 @@ async function runOnce(attempt: number): Promise<number> {
     await writeFile(
       CAPTURE,
       [
-        "Wave 12 — e2e/loop.spec.ts, live run against local Ollama",
+        "Wave 12 — e2e/loop.spec.ts, live run against a local model server",
         `captured:    ${new Date().toISOString()}`,
+        `provider:    ${resolved.provider} at ${resolved.baseUrl} (${resolved.source})`,
         `attempt:     ${attempt} of ${ATTEMPTS} — ${rounds.length} rounds`,
         `feedback:    ${
           feedbackSent.length === 0

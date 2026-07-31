@@ -58,6 +58,8 @@ import { fileURLToPath } from "node:url";
 
 import { _electron as electron, expect, test, type ElectronApplication } from "@playwright/test";
 
+import { warmModel } from "./provider";
+
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SCREENSHOT = fileURLToPath(
   new URL("../docs/superpowers/specs/screenshots/2026-07-29-wave-10-boot.png", import.meta.url),
@@ -79,44 +81,18 @@ const ATTEMPTS = 4;
  * §6.8's default generator binding, warmed before the app is launched.
  *
  * Spelled here rather than read from the running app because the warm-up has to
- * happen *before* `electron.launch` — see `warmGenerator`. The duplication is
- * not left to drift: the value is asserted against `getModels()` once the app is
- * up, so a changed default fails loudly instead of silently un-warming the test.
+ * happen *before* `electron.launch` — see `warmModel`. The duplication is not
+ * left to drift: the value is asserted against `getModels()` once the app is up,
+ * so a changed default fails loudly instead of silently un-warming the test.
+ *
+ * **This is an Ollama tag** — A16. The same weights on LM Studio are
+ * `qwen3-vl-8b-instruct`, so on a machine where detection resolves LM Studio the
+ * app's default binding names a model that server does not have.
+ * `e2e/provider.ts`'s preflight is what turns that from a 404 four minutes into
+ * a generation into a message at the top of the run naming the provider, the
+ * URL and what that server actually has.
  */
 const GENERATOR = "qwen3-vl:8b-instruct-q4_K_M";
-
-/**
- * Load the generator into Ollama before the app starts.
- *
- * Fixture setup, not the thing under test. §6.8 scales `callTimeoutMs` by canvas
- * area above a floor (§6.8 A12), so a 16×16 draft gets 45s — and a generator
- * that Ollama has evicted
- * spends all of that budget being loaded back into memory rather than
- * generating, which is how a run ends with `rounds: []` and nothing to capture.
- *
- * Run **before** `electron.launch` rather than between launch and Generate. A
- * model load is minutes of heavy memory pressure, and holding an idle Electron
- * app open across it cost one run its renderer entirely ("Target page, context or
- * browser has been closed"). Nothing needs the app to be running for this.
- *
- * The critic is deliberately not warmed: loading it can evict the generator,
- * which is the problem rather than the fix.
- */
-async function warmGenerator(): Promise<void> {
-  const ollama = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
-  const response = await fetch(`${ollama}/api/generate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: GENERATOR,
-      prompt: "hi",
-      stream: false,
-      think: false,
-      options: { num_predict: 1 },
-    }),
-  });
-  expect(response.ok, `could not reach Ollama at ${ollama} to warm ${GENERATOR}`).toBe(true);
-}
 
 /**
  * Every key the preload must expose, spelled out rather than imported.
@@ -134,12 +110,14 @@ const API_KEYS = [
   "getConfig",
   "getModels",
   "getPalettes",
+  "getProvider",
   "getSession",
   "getSessionPath",
   "listModels",
   "onEvent",
   "run",
   "setPixel",
+  "setProvider",
 ];
 
 /**
@@ -150,7 +128,8 @@ const API_KEYS = [
  * the sprite.
  */
 async function bootAndGenerate(attempt: number): Promise<number> {
-  await warmGenerator();
+  // A16: whichever provider the app is about to resolve, not a hardcoded Ollama.
+  const resolved = await warmModel(GENERATOR);
 
   let app: ElectronApplication | undefined;
   try {
@@ -238,15 +217,35 @@ async function bootAndGenerate(attempt: number): Promise<number> {
     await expect(status).toHaveText(/IDLE/);
     expect(await rowsText()).not.toMatch(GRID);
 
-    // The model `warmGenerator` loaded has to be the model the run will call,
-    // or the warm-up is a no-op nobody notices. This is what keeps `GENERATOR`
-    // honest, and it exercises `getModels` across the bridge at the same time.
+    // The model `warmModel` loaded has to be the model the run will call, or the
+    // warm-up is a no-op nobody notices. This is what keeps `GENERATOR` honest,
+    // and it exercises `getModels` across the bridge at the same time. The
+    // *availability* half of that claim is A16's preflight above, which has
+    // already asserted the resolved provider actually has this model.
     const bound = await page.evaluate(() =>
       (
         window as unknown as { api: { getModels(): Promise<{ generator: string }> } }
       ).api.getModels(),
     );
-    expect(bound.generator).toBe(GENERATOR);
+    expect(
+      bound.generator,
+      `the app's default generator binding is not ${GENERATOR}, so the warm-up ` +
+        `against ${resolved.provider} at ${resolved.baseUrl} loaded the wrong model`,
+    ).toBe(GENERATOR);
+
+    // A16: the app resolved a provider on its own, and the row says which. If it
+    // disagrees with the provider this spec warmed, everything after here is
+    // measuring a different server.
+    const view = await page.evaluate(() =>
+      (
+        window as unknown as {
+          api: { getProvider(): Promise<{ ok: boolean; value?: { provider: string; baseUrl: string } }> };
+        }
+      ).api.getProvider(),
+    );
+    expect(view.ok).toBe(true);
+    expect(view.value?.provider).toBe(resolved.provider);
+    expect(view.value?.baseUrl).toBe(resolved.baseUrl);
 
     await page.getByTestId("prompt").fill("a sitting red fox, front facing");
     await page.getByTestId("generate").click();
@@ -296,8 +295,9 @@ async function bootAndGenerate(attempt: number): Promise<number> {
     await writeFile(
       CAPTURE,
       [
-        "Wave 10 — e2e/boot.spec.ts, live run against local Ollama",
+        "Wave 10 — e2e/boot.spec.ts, live run against a local model server",
         `captured: ${new Date().toISOString()}`,
+        `provider: ${resolved.provider} at ${resolved.baseUrl} (${resolved.source})`,
         `cold boots attempted: ${attempt} of ${ATTEMPTS}`,
         `webPreferences: ${JSON.stringify(prefs)}`,
         `window.api keys: ${keys.join(", ")}`,

@@ -58,10 +58,11 @@ import { GateBar } from "./components/GateBar";
 import { ModelPickers } from "./components/ModelPickers";
 import { PaletteBar } from "./components/PaletteBar";
 import { PromptBar, type CanvasSize } from "./components/PromptBar";
+import { ProviderRow } from "./components/ProviderRow";
 import { StatusBar, type StatusFailure } from "./components/StatusBar";
 import { currentRound, editorStore, useEditor } from "./state/store";
 
-import type { Api, ModelRole, Result } from "../preload/index";
+import type { Api, ModelRole, ProviderName, ProviderView, Result } from "../preload/index";
 
 declare global {
   interface Window {
@@ -108,13 +109,15 @@ export function App(): React.JSX.Element {
   const [palettes, setPalettes] = useState<readonly Palette[]>([]);
   const [installed, setInstalled] = useState<readonly string[]>([]);
   const [bound, setBound] = useState<{ generator: string; critic: string } | null>(null);
+  /** Which server the app resolved, or `null` before `getProvider` answers (A16). */
+  const [provider, setProvider] = useState<ProviderView | null>(null);
   /** The mutation main is holding the session for, or `null`. */
   const [pending, setPending] = useState<string | null>(null);
   const [liveRound, setLiveRound] = useState(0);
   const [turn, setTurn] = useState<string | null>(null);
   const [failure, setFailure] = useState<StatusFailure | null>(null);
-  /** Why Generate is unavailable — §8's "no silent fallback". */
-  const [blocked, setBlocked] = useState<string | null>(null);
+  /** The model list's own failure — one of `blocked`'s three causes below. */
+  const [modelsError, setModelsError] = useState<string | null>(null);
 
   useEffect(() => {
     // The unsubscriber is the preload's own, so the listener is removed from
@@ -161,7 +164,7 @@ export function App(): React.JSX.Element {
     const list = await window.api.listModels();
     if (!list.ok) {
       setInstalled([]);
-      setBlocked(
+      setModelsError(
         list.endpoint === undefined
           ? `${list.code}: ${list.message}`
           : `${list.code}: ${list.message} — ${list.endpoint}`,
@@ -170,16 +173,66 @@ export function App(): React.JSX.Element {
       return;
     }
     setInstalled(list.value);
-    setBlocked(null);
+    setModelsError(null);
   }, []);
+
+  /**
+   * Which server the app is on, and whether it is answering — A16.
+   *
+   * Re-read rather than remembered, and read from main rather than derived here:
+   * `connected` is a claim about a socket and `unavailable` is a comparison
+   * against the *server's* model list, and §5.1 leaves both to main.
+   */
+  const refreshProvider = useCallback(async () => {
+    const result = await window.api.getProvider();
+    if (!result.ok) {
+      setFailure({ code: result.code, message: result.message, endpoint: result.endpoint });
+      return;
+    }
+    setProvider(result.value);
+  }, []);
+
+  /** §9's explicit retry, widened by A16 to re-ask whether the server is there. */
+  const reconnect = useCallback(async () => {
+    await refreshProvider();
+    await loadModels();
+  }, [refreshProvider, loadModels]);
 
   useEffect(() => {
     // A reload finds main still holding the session, and §8 requires the state
     // and stop reason to survive that. Nothing here starts a run.
     void refresh();
-    void loadModels();
+    void reconnect();
     void window.api.getPalettes().then(setPalettes);
-  }, [refresh, loadModels]);
+  }, [refresh, reconnect]);
+
+  /**
+   * Why Generate is unavailable — §8's "no silent fallback", with A16's causes.
+   *
+   * Three of them, and they are ordered by how early they stop a run. A model
+   * list that could not be fetched is the oldest (§9's unreachable-Ollama row); a
+   * provider that is not answering is the same failure named at the server
+   * rather than at the call; and a binding the current server does not have is
+   * the one A16 adds — the failure that would otherwise land on the *first model
+   * call of a run*, as a 404 attributed to the pipeline.
+   *
+   * Derived rather than stored, so it cannot go stale behind a switch: every
+   * input is re-read after every mutation that could change it.
+   */
+  const blocked = useMemo((): string | null => {
+    if (modelsError !== null) return modelsError;
+    if (provider === null) return null;
+    if (!provider.connected) {
+      return provider.error ?? `${provider.baseUrl} is not answering`;
+    }
+    if (provider.unavailable.length > 0) {
+      const bindings = provider.unavailable
+        .map((m) => `${m.role} is bound to ${m.model}`)
+        .join("; ");
+      return `${bindings} — ${provider.provider} does not have it, so pick a model this server has`;
+    }
+    return null;
+  }, [modelsError, provider]);
 
   /**
    * Run one mutation at a time, rendering whatever main answers.
@@ -198,7 +251,9 @@ export function App(): React.JSX.Element {
         if (!result.ok) {
           setFailure({ code: result.code, message: result.message, endpoint: result.endpoint });
           if (result.code === "ollama-unreachable") {
-            setBlocked(`${result.message}${result.endpoint === undefined ? "" : ` — ${result.endpoint}`}`);
+            setModelsError(
+              `${result.message}${result.endpoint === undefined ? "" : ` — ${result.endpoint}`}`,
+            );
           }
           return;
         }
@@ -268,8 +323,44 @@ export function App(): React.JSX.Element {
       // Re-read rather than assume: `bindModel` writes through to the live
       // config, and the picker should show what the next run will actually call.
       setBound(await window.api.getModels());
+      // A16: the binding the row was warning about may be the one just fixed, and
+      // `unavailable` is main's answer rather than something to recompute here.
+      await refreshProvider();
     },
-    [],
+    [refreshProvider],
+  );
+
+  /**
+   * Point the app at a provider and base URL — A16.
+   *
+   * An empty `baseUrl` is `ProviderRow` saying "that provider's own default",
+   * which main resolves; the renderer does not know a port number.
+   *
+   * **A refusal is rendered.** `setProvider` is a session mutation, so
+   * `main/ipc.ts` rule 5 answers `{ok: false, code: "busy"}` while a run holds
+   * the session — and §12 puts that window at minutes. Showing the new provider
+   * anyway would be §8's founding defect through a different door: an action
+   * that did not happen, reported as though it had.
+   */
+  const chooseProvider = useCallback(
+    async (name: ProviderName, baseUrl: string) => {
+      setPending("provider");
+      setFailure(null);
+      try {
+        const result = await window.api.setProvider(name, baseUrl);
+        if (!result.ok) {
+          setFailure({ code: result.code, message: result.message, endpoint: result.endpoint });
+          return;
+        }
+        setProvider(result.value);
+        // §9: "pickers list only installed models" — and installed is a property
+        // of the server, so the list must be re-read rather than kept.
+        await loadModels();
+      } finally {
+        setPending(null);
+      }
+    },
+    [loadModels],
   );
 
   const paint = useCallback(
@@ -334,6 +425,11 @@ export function App(): React.JSX.Element {
           blocked={blocked}
           onGenerate={() => void generate()}
         >
+          <ProviderRow
+            view={provider}
+            disabled={pending !== null}
+            onSelect={(name, baseUrl) => void chooseProvider(name, baseUrl)}
+          />
           <ModelPickers
             installed={installed}
             bound={bound}
@@ -342,14 +438,16 @@ export function App(): React.JSX.Element {
           />
           {blocked === null ? null : (
             // §9: "explicit retry". A disabled Generate with no way back would
-            // make a transient Ollama restart terminal for the session.
+            // make a transient server restart terminal for the session — and
+            // after A16 the retry re-asks whether the server is there at all,
+            // not only what it has installed.
             <button
               type="button"
               data-testid="retry"
               style={styles.retry}
-              onClick={() => void loadModels()}
+              onClick={() => void reconnect()}
             >
-              Retry Ollama
+              Retry
             </button>
           )}
         </PromptBar>

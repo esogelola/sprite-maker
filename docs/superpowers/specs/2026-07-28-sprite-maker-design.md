@@ -539,6 +539,37 @@ Two facts qualify all of this and belong in the record:
 
 **What is not yet known.** No live LM Studio instance has run this. The wire format is pinned by a local HTTP server that records the received body, and the `reasoning_effort` and `response_format` behaviours were probed against Ollama's OpenAI-compatible endpoint — which is *an* OpenAI implementation, not LM Studio's. Specifically unverified: that LM Studio accepts these bodies at all; that `strict: true` enforces **A10's draft schema**, an `anyOf` over five `const`-tagged variants, through llama.cpp's GBNF converter (the mechanism was confirmed working on a simple schema, the shape that matters was not); that LM Studio implements `reasoning_effort`; that its `/v1/models` ids are usable as `model` values in the same session; and that a 40-turn revise loop survives it. First failure to look for is an off-shape draft.
 
+**Amendment A16 — the app finds the server, and the provider is a control rather than a variable.** A15 shipped LM Studio behind `SPRITE_MAKER_PROVIDER=lmstudio`, which for the person that provider was written for — a cobuilder developing on Linux against LM Studio — is the same class of thing they were already doing by hand. A16's claim is smaller and more useful: **clone, `npm run dev`, and the editor is talking to whatever is actually running.** `main/provider.ts` gains `detectProvider(env)`, and `registerIpc` takes a `ProviderControl` instead of a client.
+
+`detectProvider` probes **the listing endpoint each client already uses** — `/api/tags` and `/v1/models` — because a 200 there already means "the model server is there and answering", and a dedicated health path would be one more thing to keep true about a server this project does not own. Four properties of the sweep are load-bearing:
+
+| | |
+|---|---|
+| An explicit `SPRITE_MAKER_PROVIDER` **probes nothing** | The user answered the question. Detection that overrode them would attribute a run to a provider they did not choose. |
+| Probes are **concurrent**, each with a **1.5s budget** | A refused connection returns instantly, which is what makes a serial, unbounded sweep look correct on the machine it was written on. A firewalled port that black-holes packets never returns at all, and startup would be a blank window whose symptom points at Electron. |
+| **Ollama wins when both answer** | Every capture in this project was measured against Ollama. A silent switch on a machine running both would invalidate the comparison with every test still green. The preference is `PROVIDERS`' own order, so it cannot drift from the order the errors report. |
+| **Finding nothing is not fatal** | It keeps the default provider, records the diagnostic, and boots — because the fix is the provider row, and refusing to start would mean editing an environment variable to reach the setting that replaces the environment variable. |
+
+That last row is the exact **opposite** of an unknown `SPRITE_MAKER_PROVIDER`, which stays a hard `app.exit(1)`: a typo in a variable cannot be corrected from inside an app that already started against the wrong server, and A15's reasoning for it is unchanged. The two failures look similar and are treated oppositely on purpose.
+
+**The failure message is the whole diagnostic**, because it is what reaches a machine neither author can log into. It names both providers, both endpoints and both errnos, then both remedies:
+
+```
+no model server answered — tried ollama at http://127.0.0.1:11434/api/tags (ECONNREFUSED) and
+lmstudio at http://127.0.0.1:1234/v1/models (ECONNREFUSED). Start Ollama or LM Studio's local
+server, or set the provider and base URL in the app's provider row (the shell equivalent is
+SPRITE_MAKER_PROVIDER with OLLAMA_BASE_URL / LMSTUDIO_BASE_URL)
+```
+
+**`IpcDeps.client` becomes `IpcDeps.provider`, and every consumer reads through it.** `registerIpc({ client, … })` captured the client **by value**, while `renderer: () => …` beside it was a getter precisely so it could change — so nothing could re-resolve the provider at runtime and a switch would have taken effect at the next restart, silently. `registerIpc` now builds one late-binding `LlmClient` that calls `deps.provider.client()` per method, and hands *that* to `createModelRegistry` and `PipelineDeps`; both are constructed once at registration and would otherwise have kept the old server while every surface claimed the new one.
+
+**§9 gains `getProvider` / `setProvider`**, both answering the same `Result<T>` envelope as `bindModel`. `getProvider` is a **read** and deliberately not `exclusive` — §12 puts a run at minutes, and a provider row that could not say which server was running until the run finished would be blank for the whole time it mattered. `setProvider` **is** a session mutation and goes through rule 5, so a switch during a run answers `{ok: false, code: "busy"}` and §8's bar renders it; a switch that appeared to work while the run kept calling the old server is the Accept-that-did-not-happen defect wearing a provider hat. An **empty base URL means that provider's own default**, which is how the row changes provider without carrying a port across — pointing LM Studio at 11434 is the mistake A15 gave each provider its own variable to prevent.
+
+**A switch re-validates the model bindings, and reports rather than repairs.** `qwen3-vl:8b-instruct-q4_K_M` is an Ollama tag; the same weights on LM Studio are `qwen3-vl-8b-instruct`. The binding is **kept** — `ModelPickers` already renders a bound-but-missing model as `(not installed)` and disabled, which is the only way the picker can keep telling the truth about what the next run would call — and every unavailable role is returned on `ProviderView.unavailable`, which **disables Generate** with the model named in the tooltip. Silently carrying the name would surface as a 404 on the first model call of the next run, attributed to the pipeline. When the new server does not answer at all, `unavailable` is empty *because nothing was checked*, and the `connected: false` beside it is what says so.
+
+**What is not yet known, and what A16 does not change.** The Ollama path is unchanged: no new environment variable is required, the default is still Ollama, and a machine running it resolves exactly as before plus one loopback listing call at startup. Everything A15 recorded as unverified about LM Studio remains unverified — no live LM Studio instance has run this, and detection finding LM Studio only proves that something answered `GET /v1/models`. **Nothing here has been run on Linux**, which is the platform it was written for: the concurrency and timeout behaviour is pinned by tests against a `node:http` server that accepts a connection and never answers, which is a model of a firewalled port rather than a firewalled port. Electron's Linux sandbox is a separate unverified caveat — see the README.
+
+
 ---
 
 ## 7. Pipeline and control flow

@@ -78,9 +78,10 @@ import { GateBar } from "../../src/renderer/components/GateBar";
 import { ModelPickers } from "../../src/renderer/components/ModelPickers";
 import { PaletteBar } from "../../src/renderer/components/PaletteBar";
 import { PromptBar } from "../../src/renderer/components/PromptBar";
+import { ProviderRow } from "../../src/renderer/components/ProviderRow";
 import { StatusBar } from "../../src/renderer/components/StatusBar";
 import { editorStore } from "../../src/renderer/state/store";
-import type { Api } from "../../src/preload/index";
+import type { Api, ProviderView } from "../../src/preload/index";
 
 // ---------------------------------------------------------------------------
 // documents
@@ -321,9 +322,31 @@ interface Harness {
   applyFeedback: ReturnType<typeof vi.fn>;
   exportPng: ReturnType<typeof vi.fn>;
   bindModel: ReturnType<typeof vi.fn>;
+  listModels: ReturnType<typeof vi.fn>;
+  getModels: ReturnType<typeof vi.fn>;
+  /** A16's provider surface. `setProvider` writes through to `getProvider`. */
+  getProvider: ReturnType<typeof vi.fn>;
+  setProvider: ReturnType<typeof vi.fn>;
   /** What the next `getSession` resolves with. */
   session: SessionHistory | null;
 }
+
+/** Amendment A16's default view: Ollama, found by detection, answering. */
+const DETECTED_OLLAMA: ProviderView = {
+  provider: "ollama",
+  baseUrl: "http://127.0.0.1:11434",
+  source: "detected",
+  connected: true,
+  error: null,
+  probes: [],
+  unavailable: [],
+};
+
+/** Each provider's documented default, mirrored from `main/provider.ts`. */
+const PROVIDER_DEFAULT_URLS: Record<string, string> = {
+  ollama: "http://127.0.0.1:11434",
+  lmstudio: "http://127.0.0.1:1234",
+};
 
 function harness(initial: SessionHistory | null = null): Harness {
   const listeners = new Set<Listener>();
@@ -386,9 +409,38 @@ function harness(initial: SessionHistory | null = null): Harness {
 
   const bindModel = vi.fn(async () => ({ ok: true as const, value: undefined }));
 
+  /**
+   * A16's provider surface, with main's own semantics in miniature.
+   *
+   * `setProvider` writes through, so the App's re-read after a switch sees what
+   * a real main would have: an empty base URL means that provider's default —
+   * the one rule the renderer must not reimplement, and therefore the one the
+   * stub has to honour.
+   */
+  const providerState: { view: ProviderView } = { view: { ...DETECTED_OLLAMA } };
+  const getProvider = vi.fn(async () => ({ ok: true as const, value: providerState.view }));
+  const setProvider = vi.fn(async (provider: string, baseUrl: string) => {
+    providerState.view = {
+      ...providerState.view,
+      provider: provider as ProviderView["provider"],
+      baseUrl: baseUrl.trim().length === 0 ? PROVIDER_DEFAULT_URLS[provider] : baseUrl,
+      source: "configured",
+      connected: true,
+      error: null,
+      probes: [],
+      unavailable: [],
+    };
+    return { ok: true as const, value: providerState.view };
+  });
+
+  const listModels = vi.fn(async () => ({ ok: true as const, value: [] as string[] }));
+  const getModels = vi.fn(async () => ({ generator: "g", critic: "c" }));
+
   const api = {
-    listModels: vi.fn(async () => ({ ok: true as const, value: [] as string[] })),
-    getModels: vi.fn(async () => ({ generator: "g", critic: "c" })),
+    listModels,
+    getModels,
+    getProvider,
+    setProvider,
     bindModel,
     getConfig: vi.fn(async () => HarnessConfigSchema.parse({})),
     getPalettes: vi.fn(async () => []),
@@ -415,6 +467,10 @@ function harness(initial: SessionHistory | null = null): Harness {
     applyFeedback,
     exportPng,
     bindModel,
+    listModels,
+    getModels,
+    getProvider,
+    setProvider,
     get session() {
       return state.session;
     },
@@ -1892,5 +1948,359 @@ describe("App — reload survival", () => {
     expect(screen.queryByTestId("dock")).toBeNull();
     expect(screen.queryByTestId("gate")).toBeNull();
     expect(screen.getByTestId("filmstrip-empty")).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ProviderRow — amendment A16
+// ---------------------------------------------------------------------------
+
+/**
+ * The provider row, beside the model pickers.
+ *
+ * §8's bar was `[prompt……] [Generate] [32▾] [pico-8▾] [models▾]`, and A16 adds
+ * the question that comes before all of them: *which server is this talking to,
+ * and is it there?* The row exists because detection is invisible otherwise — a
+ * cobuilder whose app found LM Studio at 1234 has no way to confirm it did,
+ * and a cobuilder whose app found nothing has no way to point it anywhere
+ * without editing an environment variable and restarting, which is the
+ * workaround this whole amendment exists to delete.
+ *
+ * Presentational, like every other component here (§5.1): it reports a chosen
+ * provider and URL and renders whatever main answered. It does not call
+ * `Api.setProvider` itself, because the answer is a `Result` the status bar has
+ * to be able to render — including `busy`.
+ */
+describe("ProviderRow", () => {
+  const noop = (): void => {};
+
+  const view = (patch: Partial<ProviderView> = {}): ProviderView => ({
+    ...DETECTED_OLLAMA,
+    ...patch,
+  });
+
+  it("says nothing until main has answered", () => {
+    render(<ProviderRow view={null} onSelect={noop} />);
+    // Not a select defaulted to `ollama`: that is a claim, and before
+    // `getProvider` resolves nobody has made it.
+    expect(screen.queryByTestId("provider-select")).toBeNull();
+    expect(screen.getByTestId("provider-pending")).toBeDefined();
+  });
+
+  it("offers both providers and selects the live one", () => {
+    render(<ProviderRow view={view({ provider: "lmstudio" })} onSelect={noop} />);
+
+    const select = screen.getByTestId("provider-select") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["ollama", "lmstudio"]);
+    expect(select.value).toBe("lmstudio");
+  });
+
+  it("shows the base URL in an editable field", () => {
+    render(<ProviderRow view={view({ baseUrl: "http://192.168.1.20:1234" })} onSelect={noop} />);
+
+    const input = screen.getByTestId("provider-url") as HTMLInputElement;
+    expect(input.value).toBe("http://192.168.1.20:1234");
+    expect(input.disabled).toBe(false);
+  });
+
+  it("reports the edited URL for the current provider", () => {
+    const onSelect = vi.fn();
+    render(<ProviderRow view={view({ provider: "lmstudio" })} onSelect={onSelect} />);
+
+    fireEvent.change(screen.getByTestId("provider-url"), {
+      target: { value: "http://192.168.1.20:1234" },
+    });
+    fireEvent.click(screen.getByTestId("provider-apply"));
+
+    expect(onSelect).toHaveBeenCalledWith("lmstudio", "http://192.168.1.20:1234");
+  });
+
+  it("applies the URL on Enter as well as on the button", () => {
+    const onSelect = vi.fn();
+    render(<ProviderRow view={view()} onSelect={onSelect} />);
+
+    const input = screen.getByTestId("provider-url");
+    fireEvent.change(input, { target: { value: "http://box.local:11434" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onSelect).toHaveBeenCalledWith("ollama", "http://box.local:11434");
+  });
+
+  it("moves to the new provider's own default rather than carrying the old port", () => {
+    // A15 gave each provider its own base-URL variable for exactly this reason:
+    // pointing LM Studio at 11434 is a mistake neither server can detect. The
+    // empty URL is main's "use that provider's default", so the row never has to
+    // know the port.
+    const onSelect = vi.fn();
+    render(<ProviderRow view={view({ baseUrl: "http://127.0.0.1:11434" })} onSelect={onSelect} />);
+
+    fireEvent.change(screen.getByTestId("provider-select"), { target: { value: "lmstudio" } });
+
+    expect(onSelect).toHaveBeenCalledWith("lmstudio", "");
+  });
+
+  it("adopts a URL the app resolved on its own", async () => {
+    // The field is a text input with its own state, and a switch that main
+    // answered with a different URL — a default, or a trailing slash it stripped
+    // — has to land in it. Otherwise the row shows one thing and the app is
+    // talking to another.
+    const { rerender } = render(<ProviderRow view={view()} onSelect={noop} />);
+    rerender(
+      <ProviderRow
+        view={view({ provider: "lmstudio", baseUrl: "http://127.0.0.1:1234" })}
+        onSelect={noop}
+      />,
+    );
+
+    await waitFor(() =>
+      expect((screen.getByTestId("provider-url") as HTMLInputElement).value).toBe(
+        "http://127.0.0.1:1234",
+      ),
+    );
+  });
+
+  it("says the server is answering, and how the provider was chosen", () => {
+    render(<ProviderRow view={view({ source: "detected", connected: true })} onSelect={noop} />);
+
+    const status = screen.getByTestId("provider-status");
+    expect(status.getAttribute("data-connected")).toBe("true");
+    expect(status.getAttribute("data-source")).toBe("detected");
+    // "it picked LM Studio at :1234" has to be readable, not inferred.
+    expect(status.textContent).toMatch(/detected/i);
+  });
+
+  it("names the endpoint when the server is not answering", () => {
+    render(
+      <ProviderRow
+        view={view({
+          connected: false,
+          error: "Ollama is unreachable at http://127.0.0.1:11434/api/tags (ECONNREFUSED)",
+        })}
+        onSelect={noop}
+      />,
+    );
+
+    const status = screen.getByTestId("provider-status");
+    expect(status.getAttribute("data-connected")).toBe("false");
+    expect(status.textContent).toContain("http://127.0.0.1:11434/api/tags");
+  });
+
+  it("carries the whole detection failure when nothing answered", () => {
+    // Both URLs and both providers, because naming one sends someone running LM
+    // Studio to restart Ollama.
+    const error =
+      "no model server answered — tried ollama at http://127.0.0.1:11434/api/tags " +
+      "(ECONNREFUSED) and lmstudio at http://127.0.0.1:1234/v1/models (ECONNREFUSED)";
+    render(<ProviderRow view={view({ source: "fallback", connected: false, error })} onSelect={noop} />);
+
+    const status = screen.getByTestId("provider-status");
+    expect(status.textContent).toContain("http://127.0.0.1:11434/api/tags");
+    expect(status.textContent).toContain("http://127.0.0.1:1234/v1/models");
+  });
+
+  it("names a bound model the current provider does not have", () => {
+    // The stale-binding state, rendered rather than discovered inside a run.
+    render(
+      <ProviderRow
+        view={view({
+          provider: "lmstudio",
+          unavailable: [{ role: "generator", model: "qwen3-vl:8b-instruct-q4_K_M" }],
+        })}
+        onSelect={noop}
+      />,
+    );
+
+    const warning = screen.getByTestId("provider-unavailable");
+    expect(warning.textContent).toContain("qwen3-vl:8b-instruct-q4_K_M");
+    expect(warning.textContent).toContain("generator");
+  });
+
+  it("says nothing about bindings when every one of them exists", () => {
+    render(<ProviderRow view={view()} onSelect={noop} />);
+    expect(screen.queryByTestId("provider-unavailable")).toBeNull();
+  });
+
+  it("greys out while a mutation holds the session", () => {
+    // `main/ipc.ts` rule 5 refuses a switch during a run. The controls follow the
+    // refusal rather than inviting one.
+    render(<ProviderRow view={view()} onSelect={noop} disabled />);
+
+    expect((screen.getByTestId("provider-select") as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByTestId("provider-url") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByTestId("provider-apply") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// App — the provider row's round trip
+// ---------------------------------------------------------------------------
+
+describe("App — the provider row", () => {
+  let h: Harness;
+
+  beforeEach(() => {
+    h = harness(null);
+    window.api = h.api;
+  });
+
+  it("shows the provider main resolved, on first paint", async () => {
+    render(<App />);
+
+    await waitFor(() =>
+      expect((screen.getByTestId("provider-select") as HTMLSelectElement).value).toBe("ollama"),
+    );
+    expect(h.getProvider).toHaveBeenCalled();
+    expect((screen.getByTestId("provider-url") as HTMLInputElement).value).toBe(
+      "http://127.0.0.1:11434",
+    );
+  });
+
+  it("switches provider and repopulates the model pickers", async () => {
+    // §9: "pickers list only installed models" — and the installed models are a
+    // property of the *server*, so a switch that left the old list on screen
+    // would offer models the new provider does not have.
+    h.listModels.mockResolvedValueOnce({ ok: true, value: ["ollama-only"] });
+    h.getModels.mockResolvedValueOnce({ generator: "ollama-only", critic: "ollama-only" });
+    render(<App />);
+
+    await waitFor(() =>
+      expect(
+        Array.from((screen.getByTestId("model-generator") as HTMLSelectElement).options).map(
+          (o) => o.value,
+        ),
+      ).toEqual(["ollama-only"]),
+    );
+
+    h.listModels.mockResolvedValue({ ok: true, value: ["lmstudio-only"] });
+    h.getModels.mockResolvedValue({ generator: "lmstudio-only", critic: "lmstudio-only" });
+
+    fireEvent.change(screen.getByTestId("provider-select"), { target: { value: "lmstudio" } });
+
+    await waitFor(() => expect(h.setProvider).toHaveBeenCalledWith("lmstudio", ""));
+    await waitFor(() =>
+      expect(
+        Array.from((screen.getByTestId("model-generator") as HTMLSelectElement).options).map(
+          (o) => o.value,
+        ),
+      ).toEqual(["lmstudio-only"]),
+    );
+    // And the row shows where it went — LM Studio's own port, not Ollama's.
+    expect((screen.getByTestId("provider-url") as HTMLInputElement).value).toBe(
+      "http://127.0.0.1:1234",
+    );
+  });
+
+  it("repopulates the pickers when only the base URL changes", async () => {
+    h.listModels.mockResolvedValueOnce({ ok: true, value: ["here"] });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("provider-url")).toBeDefined());
+
+    h.listModels.mockResolvedValue({ ok: true, value: ["over-there"] });
+    fireEvent.change(screen.getByTestId("provider-url"), {
+      target: { value: "http://192.168.1.20:11434" },
+    });
+    fireEvent.click(screen.getByTestId("provider-apply"));
+
+    await waitFor(() =>
+      expect(h.setProvider).toHaveBeenCalledWith("ollama", "http://192.168.1.20:11434"),
+    );
+    await waitFor(() =>
+      expect(
+        Array.from((screen.getByTestId("model-generator") as HTMLSelectElement).options).map(
+          (o) => o.value,
+        ),
+      ).toContain("over-there"),
+    );
+  });
+
+  it("renders a refused switch instead of swallowing it", async () => {
+    // Wave 10b answers a second session mutation `{ok:false, code:"busy"}`, and
+    // §8's founding defect is an action that did not happen being reported as
+    // though it had. Wave 12 already surfaces `busy`; this joins it.
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("provider-select")).toBeDefined());
+
+    h.setProvider.mockResolvedValueOnce({
+      ok: false,
+      code: "busy",
+      message: "setProvider: run is still in flight — one session mutation at a time",
+    });
+
+    fireEvent.change(screen.getByTestId("provider-select"), { target: { value: "lmstudio" } });
+
+    await waitFor(() => {
+      const error = screen.getByTestId("error");
+      expect(error.getAttribute("data-code")).toBe("busy");
+      expect(error.textContent).toContain("one session mutation at a time");
+    });
+    // The row still shows the provider that is actually in use.
+    expect((screen.getByTestId("provider-select") as HTMLSelectElement).value).toBe("ollama");
+  });
+
+  it("blocks Generate when the new provider does not have the bound model", async () => {
+    // The stale-binding decision, at the surface it has to land on: the failure
+    // happens at the switch, not minutes later inside a generation.
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("provider-select")).toBeDefined());
+
+    h.setProvider.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        provider: "lmstudio",
+        baseUrl: "http://127.0.0.1:1234",
+        source: "configured",
+        connected: true,
+        error: null,
+        probes: [],
+        unavailable: [{ role: "generator", model: "qwen3-vl:8b-instruct-q4_K_M" }],
+      },
+    });
+
+    fireEvent.change(screen.getByTestId("provider-select"), { target: { value: "lmstudio" } });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("generate") as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(screen.getByTestId("generate").getAttribute("title")).toContain(
+      "qwen3-vl:8b-instruct-q4_K_M",
+    );
+    expect(screen.getByTestId("provider-unavailable").textContent).toContain("generator");
+  });
+
+  it("blocks Generate when the provider is not answering", async () => {
+    h.getProvider.mockResolvedValue({
+      ok: true,
+      value: {
+        provider: "lmstudio",
+        baseUrl: "http://127.0.0.1:1234",
+        source: "fallback",
+        connected: false,
+        error: "no model server answered — tried ollama at … and lmstudio at …",
+        probes: [],
+        unavailable: [],
+      },
+    });
+    render(<App />);
+
+    await waitFor(() =>
+      expect((screen.getByTestId("generate") as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(screen.getByTestId("provider-status").getAttribute("data-connected")).toBe("false");
+  });
+
+  it("re-reads the provider when Retry is pressed", async () => {
+    // §9's explicit retry. A user who started their server after the app has to
+    // have a way back that is not a restart — and after A16 that path includes
+    // re-asking whether the server is there at all.
+    h.listModels.mockResolvedValueOnce({ ok: false, code: "ollama-unreachable", message: "down" });
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("retry")).toBeDefined());
+    const before = h.getProvider.mock.calls.length;
+
+    h.listModels.mockResolvedValue({ ok: true, value: ["back"] });
+    fireEvent.click(screen.getByTestId("retry"));
+
+    await waitFor(() => expect(h.getProvider.mock.calls.length).toBeGreaterThan(before));
   });
 });

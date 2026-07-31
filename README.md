@@ -14,7 +14,7 @@ You type *"a dog standing"*. A local Qwen 3 VL model composes the sprite as **8�
 
 ## Honest status
 
-**Waves 1–12 of 14 are shipped.** 1579 tests, `tsc` clean, the app builds and boots.
+**Waves 1–12 of 14 are shipped.** 1639 tests, `tsc` clean, the app builds and boots.
 
 It works as **generate → judge → keep**. It does not work as **iterate**, and that is measured rather than suspected:
 
@@ -40,7 +40,7 @@ npm run build && npm run dev
 `qwen3-vl:8b` is bound to **both** roles by default — it drafts and it critiques. That is deliberate: it keeps one 6 GB model resident instead of thrashing two, and the critic's diagnosis is already good. A `qwen3:8b` text model **cannot** draw pixel art at all (measured — it returns solid rectangles), which is why the vision model does both jobs.
 
 ```bash
-npm test          # 1579 unit tests, no model required
+npm test          # 1639 unit tests, no model required
 npm run typecheck
 npm run e2e       # Playwright against a built app + live Ollama
 npm run test:live # opt-in, hits real models
@@ -48,18 +48,43 @@ npm run test:live # opt-in, hits real models
 
 ### Providers
 
-Ollama is the default. **LM Studio** works too — it speaks the OpenAI API, and
-`src/main/lmstudio.ts` translates:
+**You should not have to configure this.** On startup the app probes both
+providers' listing endpoints — `/api/tags` and `/v1/models` — concurrently, with
+a 1.5-second budget each, and uses whichever answers. Ollama wins if both are
+running. The provider row in the top bar shows what it found and lets you change
+it without a restart.
+
+![The provider row](docs/superpowers/specs/screenshots/2026-07-30-provider-row.png)
+
+Ollama is the default and the only provider verified end to end. **LM Studio**
+works too — it speaks the OpenAI API, and `src/main/lmstudio.ts` translates.
+
+If you want to skip detection or point somewhere non-default:
 
 ```bash
 SPRITE_MAKER_PROVIDER=lmstudio npm run dev             # http://127.0.0.1:1234
 SPRITE_MAKER_PROVIDER=lmstudio LMSTUDIO_BASE_URL=http://192.168.1.20:1234 npm run dev
+OLLAMA_BASE_URL=http://192.168.1.20:11434 npm run dev  # still detected, at your URL
 ```
 
-`SPRITE_MAKER_PROVIDER` is `ollama` (default) or `lmstudio`; anything else fails
-at startup rather than quietly falling back. Each provider reads its own base URL
-— `OLLAMA_BASE_URL` or `LMSTUDIO_BASE_URL` — and whatever you supply is used
-verbatim, so a hostname, an IPv6 literal or another machine on the LAN all work.
+Setting `SPRITE_MAKER_PROVIDER` **skips detection entirely** — you have answered
+the question, and the app will not second-guess you. It is `ollama` or
+`lmstudio`; anything else fails at startup rather than quietly falling back
+(a typo you cannot fix from inside an app that started against the wrong server).
+Each provider reads its own base URL — `OLLAMA_BASE_URL` or `LMSTUDIO_BASE_URL` —
+and whatever you supply is used verbatim, so a hostname, an IPv6 literal or
+another machine on the LAN all work.
+
+**When nothing answers, the app still starts.** It says so, naming both URLs it
+tried and why each failed, and the provider row is how you fix it — refusing to
+boot would mean editing an environment variable to reach the setting that
+replaces the environment variable.
+
+**Switching provider re-checks your model bindings.** `qwen3-vl:8b-instruct-q4_K_M`
+is an Ollama tag; the same weights on LM Studio are `qwen3-vl-8b-instruct`. If the
+new server does not have what you have bound, the row says so and Generate is
+disabled until you pick a model it does have — rather than failing on the first
+model call of your next run.
 
 **The LM Studio provider is unverified against a live LM Studio instance.** It
 was built and tested against a local HTTP server that records the exact request
@@ -85,6 +110,43 @@ caveats, in descending order of how likely they are to bite:
   `think` question is a no-op on the shipped configuration, and matters only if
   you bind a hybrid model like `qwen3:8b`.
 
+### Linux / other environments
+
+The cobuilder on this project develops on Linux with LM Studio. **Neither of us
+can test Linux**, so this section is what is designed for it, plus one caveat
+that is explicitly unverified.
+
+- **Auto-detection is the point.** Clone, `npm install`, `npm run build && npm run dev`.
+  If LM Studio's local server is running (Developer tab ▸ Status: Running), the
+  app finds it at `127.0.0.1:1234` and says `connected · detected` in the
+  provider row. No environment variables.
+- **A server on another host, or a non-default port:** type it into the provider
+  row's URL field and press Connect, or export `LMSTUDIO_BASE_URL` /
+  `OLLAMA_BASE_URL`. Detection probes whatever those variables name, so setting
+  only the URL still leaves detection in charge of *which* provider.
+- **Check the wiring in seconds, before spending twenty minutes on a live run:**
+  `npm run build && npx playwright test e2e/provider.spec.ts`. It boots the real
+  app, asserts the row reflects a server that actually answered, and writes the
+  screenshot above. The longer specs (`boot`, `canvas`, `loop`) now resolve the
+  provider the same way the app does, and each one fails up front with the
+  provider, the URL and that server's installed model list if the model it needs
+  is not there.
+- **Electron's Linux sandbox — a known, unverified caveat.**
+  `src/main/index.ts` deliberately leaves `webPreferences.sandbox` **unset** (at
+  Electron's default). That is load-bearing: Electron will not load an ESM
+  preload in a sandboxed renderer and gives no error when it refuses, so
+  `window.api` simply comes back `undefined` — and `sandbox: false` makes that
+  symptom disappear by switching off the isolation the preload exists to
+  preserve. Do not "fix" a missing `window.api` that way; the fix is the
+  `format: "cjs"` pin in `electron.vite.config.ts`.
+  Separately, some Linux distributions and most containers refuse to start
+  Electron at all without either `--no-sandbox` or a correctly-owned SUID
+  `chrome-sandbox` binary (`chown root:root node_modules/electron/dist/chrome-sandbox
+  && chmod 4755 …`). **We have not reproduced this and cannot.** If the app fails
+  to launch before any window appears — rather than launching with an empty
+  `window.api` — that is the failure to look for, and it is a different problem
+  from the preload one above.
+
 ## How it is built
 
 ```
@@ -96,7 +158,7 @@ src/renderer/  canvas · palette bar · filmstrip · critique dock · gate bar
 
 Three boundaries carry the design:
 
-- **HTTP happens in two files and nowhere else** — `main/ollama.ts` and `main/lmstudio.ts`, both behind one `LlmClient` interface. Every other module takes that interface, which is what makes the whole pipeline testable against a scripted stub with no model running, and what made adding a second provider a new file rather than a refactor.
+- **HTTP happens in two files and nowhere else** — `main/ollama.ts` and `main/lmstudio.ts`, both behind one `LlmClient` interface, chosen at startup by `main/provider.ts` and swappable at runtime from the provider row. Every other module takes that interface, which is what makes the whole pipeline testable against a scripted stub with no model running, and what made adding a second provider a new file rather than a refactor.
 - **`shared/grid.ts` is pure and is the only writer of pixels.** An agent's `place_pixel` and a user's mouse click hit identical, identically-tested validation.
 - **The harness owns control flow; the model owns content.** Round sequencing, stop conditions and the regression guard are deterministic code. What to draw, and what is wrong with it, are the model's.
 
@@ -118,7 +180,7 @@ Each of these was measured, and each is captured in [`docs/superpowers/specs/cap
 
 ## Documentation
 
-- **[Design spec](docs/superpowers/specs/2026-07-28-sprite-maker-design.md)** — authoritative. 14 amendments, each traceable to a measurement.
+- **[Design spec](docs/superpowers/specs/2026-07-28-sprite-maker-design.md)** — authoritative. 16 amendments, each traceable to a measurement.
 - **[Implementation plan](docs/superpowers/plans/2026-07-28-sprite-maker-mvp.md)** — the wave structure.
 - **[Follow-ups](docs/superpowers/plans/2026-07-30-follow-ups.md)** — Waves 13–14 in full, and the open questions.
 - **[Consistency audit](docs/superpowers/specs/2026-07-29-consistency-audit-findings.md)** — 18 blockers found by tracing every declared input back to a producer, before any of them cost a wave.
