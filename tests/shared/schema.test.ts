@@ -977,6 +977,11 @@ describe("HarnessConfigSchema", () => {
         generator: "qwen3-vl:8b-instruct-q4_K_M",
         critic: "qwen3-vl:8b-instruct-q4_K_M",
       },
+      // A17. `"auto"` and not `"concurrent"`: the two roles above are the same
+      // model, so the policy is a no-op by rule zero and the default costs
+      // nothing — while a machine that binds two different models gets the
+      // decision made for it rather than having to know the setting exists.
+      modelResidency: "auto",
     });
   });
 
@@ -1334,6 +1339,31 @@ describe("HarnessConfigSchema", () => {
     for (const t of [0, 0.6, 1, 2]) {
       expect(HarnessConfigSchema.safeParse({ temperature: t }).success).toBe(true);
     }
+  });
+
+  // -- A17: model residency -------------------------------------------------
+
+  it("defaults modelResidency to 'auto' — A17", () => {
+    // `"auto"` rather than `"concurrent"`: the shipped binding puts one model in
+    // both roles, where the policy is a no-op whatever it says, and the config
+    // that needs a decision is the one a cobuilder made deliberately.
+    expect(HarnessConfigSchema.parse({}).modelResidency).toBe("auto");
+    expect(DEFAULT_HARNESS_CONFIG.modelResidency).toBe("auto");
+  });
+
+  it("accepts each of the three policies and nothing else", () => {
+    for (const policy of ["auto", "sequential", "concurrent"]) {
+      expect(HarnessConfigSchema.safeParse({ modelResidency: policy }).success).toBe(true);
+    }
+    for (const bad of ["Auto", "serial", "", true, 1, null]) {
+      expect(HarnessConfigSchema.safeParse({ modelResidency: bad }).success).toBe(false);
+    }
+  });
+
+  it("round-trips an explicit policy", () => {
+    expect(HarnessConfigSchema.parse({ modelResidency: "sequential" }).modelResidency).toBe(
+      "sequential",
+    );
   });
 });
 

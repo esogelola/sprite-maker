@@ -340,6 +340,13 @@ const DETECTED_OLLAMA: ProviderView = {
   error: null,
   probes: [],
   unavailable: [],
+  // A17. The shipped binding puts one model in both roles, so the policy is a
+  // no-op and says so.
+  residency: {
+    configured: "auto",
+    policy: "concurrent",
+    reason: "generator and critic are both qwen3-vl:8b-instruct-q4_K_M",
+  },
 };
 
 /** Each provider's documented default, mirrored from `main/provider.ts`. */
@@ -2129,6 +2136,55 @@ describe("ProviderRow", () => {
     expect((screen.getByTestId("provider-url") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByTestId("provider-apply") as HTMLButtonElement).disabled).toBe(true);
   });
+
+  // -- the residency decision, amendment A17 --------------------------------
+
+  it("renders the resolved residency policy and the reason behind it", () => {
+    // A17's hard requirement: a heuristic nobody can see is a heuristic nobody
+    // can debug, and this row is the only place the cobuilder's machine gets to
+    // say what it decided.
+    render(
+      <ProviderRow
+        view={view({
+          residency: {
+            configured: "auto",
+            policy: "sequential",
+            reason: "models 6.1 GB + 5.2 GB exceed the 10.3 GB budget on 17.2 GB",
+          },
+        })}
+        onSelect={noop}
+      />,
+    );
+
+    const residency = screen.getByTestId("provider-residency");
+    expect(residency.textContent).toContain("sequential");
+    expect(residency.textContent).toContain("6.1 GB");
+    // The row is one line, so the whole sentence lives on the title too — the
+    // truncated half is the half that carries the numbers.
+    expect(residency.getAttribute("title")).toContain("10.3 GB budget");
+  });
+
+  it("says concurrent when concurrent is what was resolved", () => {
+    // The mutant that matters: a fixed string that always reads "sequential"
+    // renders identically on the path this feature is supposed to leave alone.
+    render(
+      <ProviderRow
+        view={view({
+          residency: {
+            configured: "auto",
+            policy: "concurrent",
+            reason: "generator and critic are both qwen3-vl:8b-instruct-q4_K_M",
+          },
+        })}
+        onSelect={noop}
+      />,
+    );
+
+    const residency = screen.getByTestId("provider-residency");
+    expect(residency.textContent).toContain("concurrent");
+    expect(residency.textContent).not.toContain("sequential");
+    expect(residency.getAttribute("data-policy")).toBe("concurrent");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2253,6 +2309,9 @@ describe("App — the provider row", () => {
         error: null,
         probes: [],
         unavailable: [{ role: "generator", model: "qwen3-vl:8b-instruct-q4_K_M" }],
+        // A17: `inspect()` resolves this on every read, so a reply that omitted
+        // it would be a shape the main process cannot actually produce.
+        residency: { configured: "auto", policy: "concurrent", reason: "one model, both roles" },
       },
     });
 
@@ -2278,6 +2337,9 @@ describe("App — the provider row", () => {
         error: "no model server answered — tried ollama at … and lmstudio at …",
         probes: [],
         unavailable: [],
+        // Nothing answered, so nothing was weighed — but the field is still
+        // present, because `inspect()` resolves it before it ever probes.
+        residency: { configured: "auto", policy: "concurrent", reason: "one model, both roles" },
       },
     });
     render(<App />);

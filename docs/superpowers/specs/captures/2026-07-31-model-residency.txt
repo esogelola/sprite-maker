@@ -1,0 +1,84 @@
+Model residency — does sequential loading do what it claims?
+============================================================
+Date:   2026-07-31
+Why:    A cobuilder on Linux with LM Studio wants a different model per role and
+        cannot hold both resident. draft/revise use models.generator and
+        critique uses models.critic, so a 3-round run with two different models
+        alternates five times.
+Models: qwen3-vl:8b-instruct-q4_K_M (6.1 GB on disk) as generator
+        qwen3:8b-q4_K_M            (5.2 GB on disk) as critic
+        The 19.6 GB 30B was never loaded.
+Host:   34.4 GB total, macOS, app and editor running.
+
+WHAT `auto` DECIDED HERE
+
+  AUTO -> concurrent
+  reason: qwen3-vl:8b-instruct-q4_K_M 6.1 GB + qwen3:8b-q4_K_M 5.2 GB = 11.4 GB,
+          which fits within the 20.6 GB budget (60% of this machine's 34.4 GB,
+          sizes from Ollama /api/tags)
+
+  The arithmetic is real and comes from /api/tags. On a 16 GB host the same pair
+  would resolve sequential, which is the case this feature exists for.
+
+WHAT THE TWO POLICIES ACTUALLY DID
+
+  SEQUENTIAL  (start: none resident)
+    draft (generator)      resident: qwen3-vl:8b-instruct-q4_K_M 10.1GB
+    critique (critic)      resident: qwen3:8b-q4_K_M              9.8GB
+    revise (generator)     resident: qwen3-vl:8b-instruct-q4_K_M 10.2GB
+
+  CONCURRENT  (start: none resident)
+    draft (generator)      resident: qwen3-vl:8b-instruct-q4_K_M 10.1GB
+    critique (critic)      resident: qwen3:8b-q4_K_M              9.8GB
+    revise (generator)     resident: qwen3-vl:8b-instruct-q4_K_M 10.1GB
+
+THE HONEST READING: THE CONTRAST DID NOT REPRODUCE ON THIS MACHINE.
+
+Sequential does what it claims - one model resident at a time, and the explicit
+eviction is issued at each stage boundary. But CONCURRENT produced the same
+trace, so this run does not demonstrate that the policy changed anything.
+
+The cause is visible in the numbers. Each model occupies ~10 GB resident once
+its 32k context is allocated, not the 5-6 GB it takes on disk, so the pair needs
+~20 GB on a 34.4 GB host that was already running the app, an editor and a
+browser. Ollama evicted the previous model on its own. The `auto` heuristic
+compares DISK sizes (11.4 GB) because that is what /api/tags reports, and so it
+concluded the pair fits - while the resident cost is nearly double that and it
+did not.
+
+TWO CONSEQUENCES, BOTH REAL
+
+1. THE HEURISTIC UNDERSTATES RESIDENT COST, ROUGHLY 2x AT 32k CONTEXT.
+   /api/tags reports on-disk bytes. Resident bytes include the KV cache, which
+   scales with context length and is not reported anywhere this app can read.
+   The 60% headroom factor absorbs some of this by accident rather than by
+   design. A host that is genuinely marginal may be told "concurrent" and then
+   thrash - which is the failure this feature was built to prevent. Anyone
+   revisiting this should either measure resident size from /api/ps after a
+   load, or shrink the headroom factor and say why.
+
+2. WHAT SEQUENTIAL ACTUALLY BUYS IS DETERMINISM, NOT EVICTION.
+   Ollama will evict under pressure regardless. It decides when, based on its
+   own heuristics, and on a host where the pair nearly fits it may keep both and
+   swap. Sequential makes the eviction happen at a known point, immediately, and
+   on every host - including LM Studio, where the app's own JIT auto-evict
+   setting may or may not be enabled. That is a smaller claim than "it prevents
+   OOM" and it is the one the evidence supports.
+
+WHAT IS PROVEN
+  - keep_alive: 0 evicts (verified separately: a resident 10 GB model left
+    `ollama ps` within 2s).
+  - The runner evicts the model being LEFT, before the call that needs the
+    memory, only on an actual change, and only under sequential - 1689 unit
+    tests including a full-trace assertion on stage order.
+  - resolveResidency reads real sizes from /api/tags and shows its arithmetic.
+  - Rule zero: when both roles hold the same model - the shipped default - the
+    policy short-circuits and issues nothing at all.
+
+WHAT IS NOT PROVEN
+  - That sequential prevents a failure concurrent would have suffered. Not
+    reproducible on a 34.4 GB host; needs a machine where the pair genuinely
+    does not fit, which is the cobuilder's.
+  - Anything on LM Studio. /v1/models reports no sizes at all, so `auto` there
+    falls back to an assumed 6 GB per model and says so in its reason string.
+  - Anything on Linux.

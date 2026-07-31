@@ -41,6 +41,7 @@ import {
   syntheticFeedbackIssue,
   type PipelineDeps,
 } from "@main/pipeline";
+import { createResidencyRunner } from "@main/residency";
 import {
   DEFAULT_HARNESS_CONFIG,
   HarnessConfigSchema,
@@ -2455,6 +2456,160 @@ describe("applyFeedback", () => {
     await expect(
       applyFeedback(deps, history, "x", 0, { ...cfg(), maxRounds: 0 } as unknown as HarnessConfig),
     ).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// model residency — spec amendment A17
+// ---------------------------------------------------------------------------
+
+/**
+ * Eviction between stages, and the three ways it goes wrong silently.
+ *
+ * §6.8's two roles alternate five times across a 3-round run —
+ * draft(G) → critique(C) → revise(G) → critique(C) → revise(G) → critique(C) —
+ * and on a host that cannot hold both models that is a thrash or an OOM. A17
+ * makes the swap explicit, and the pipeline is where "explicit" has to mean
+ * *between stages*.
+ *
+ * The mutants this section is written against:
+ *
+ * - **Evicting on every stage** rather than on a change. The call count differs;
+ *   nothing else does, and a run still completes.
+ * - **Evicting the model being entered** rather than the one being left. The
+ *   count is identical and the run pays the cold load it was trying to avoid.
+ * - **Evicting under `concurrent`**, which turns the fast path into the slow one
+ *   with no visible symptom other than wall clock.
+ */
+describe("run — model residency", () => {
+  const GEN = "generator-model";
+  const CRITIC = "critic-model";
+
+  /** The full call trace, including releases, in call order. */
+  function trace(stub: StubClient): string[] {
+    return stub.calls.map((c) => `${c.method}:${c.model}`);
+  }
+
+  function residencyDeps(
+    h: ReturnType<typeof harness>,
+    policy: "sequential" | "concurrent",
+  ): PipelineDeps {
+    return {
+      ...h.deps,
+      residency: createResidencyRunner(
+        { configured: "auto", policy, reason: "pinned by the test" },
+        h.stub,
+      ),
+    };
+  }
+
+  /** draft → critique(HIGH) → revise → critique(CONVERGED). */
+  function twoRoundScript(): StubScript {
+    return {
+      generate: [draftReply()],
+      vision: [HIGH, CONVERGED],
+      chatWithTools: [fillRowTurn(0)],
+    };
+  }
+
+  it("evicts the outgoing model at every stage boundary, and only there", async () => {
+    const h = harness(twoRoundScript());
+
+    await run(
+      residencyDeps(h, "sequential"),
+      INPUT,
+      cfg({ models: { generator: GEN, critic: CRITIC } }),
+    );
+
+    // The eviction lands **before** the call that needs the memory, and names
+    // the model being left behind.
+    expect(trace(h.stub)).toEqual([
+      `generate:${GEN}`,
+      `release:${GEN}`,
+      `vision:${CRITIC}`,
+      `release:${CRITIC}`,
+      `chatWithTools:${GEN}`,
+      `release:${GEN}`,
+      `vision:${CRITIC}`,
+    ]);
+  });
+
+  it("evicts nothing when one model serves both roles", async () => {
+    // The shipped default, and it must cost nothing even with the policy forced
+    // on: the model entered is the model already resident, every time.
+    const h = harness(twoRoundScript());
+
+    await run(
+      residencyDeps(h, "sequential"),
+      INPUT,
+      cfg({ models: { generator: GEN, critic: GEN } }),
+    );
+
+    expect(countCalls(h.stub, "release")).toBe(0);
+  });
+
+  it("evicts nothing under concurrent, however often the model changes", async () => {
+    const h = harness(twoRoundScript());
+
+    await run(
+      residencyDeps(h, "concurrent"),
+      INPUT,
+      cfg({ models: { generator: GEN, critic: CRITIC } }),
+    );
+
+    expect(countCalls(h.stub, "release")).toBe(0);
+    expect(countCalls(h.stub, "vision")).toBe(2);
+  });
+
+  it("runs unchanged when no residency is supplied at all", async () => {
+    // `PipelineDeps.residency` is optional, so every existing caller — and every
+    // other test in this file — keeps working without one.
+    const h = harness(twoRoundScript());
+
+    const history = await run(h.deps, INPUT, cfg({ models: { generator: GEN, critic: CRITIC } }));
+
+    expect(history.outcome).toBe("completed");
+    expect(countCalls(h.stub, "release")).toBe(0);
+  });
+
+  it("does not fail the run when an eviction fails", async () => {
+    // A failed unload leaves the model resident, which is the situation the
+    // policy was trying to improve — not a reason to throw away a multi-minute
+    // run. Log and continue.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = harness({ ...twoRoundScript(), release: [new Error("connection reset by peer")] });
+
+    const history = await run(
+      residencyDeps(h, "sequential"),
+      INPUT,
+      cfg({ models: { generator: GEN, critic: CRITIC } }),
+    );
+
+    expect(history.outcome).toBe("completed");
+    expect(history.error).toBeNull();
+    expect(countCalls(h.stub, "vision")).toBe(2);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("evicts on the feedback path too — §7.3 travels one code path", async () => {
+    const first = harness({
+      generate: [draftReply()],
+      vision: [CONVERGED],
+    });
+    const config = cfg({ models: { generator: GEN, critic: CRITIC } });
+    const history = await run(residencyDeps(first, "sequential"), INPUT, config);
+
+    const second = harness({ vision: [CONVERGED], chatWithTools: [fillRowTurn(0)] });
+    await applyFeedback(residencyDeps(second, "sequential"), history, "make it rounder", 0, config);
+
+    // The feedback pass enters at REVISING with the generator; the critique that
+    // follows swaps to the critic.
+    expect(trace(second.stub)).toEqual([
+      `chatWithTools:${GEN}`,
+      `release:${GEN}`,
+      `vision:${CRITIC}`,
+    ]);
   });
 });
 

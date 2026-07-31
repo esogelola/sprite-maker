@@ -64,6 +64,7 @@ import {
   type ProviderName,
 } from "@main/provider";
 import {
+  DEFAULT_HARNESS_CONFIG,
   HarnessConfigSchema,
   PipelineEventSchema,
   SessionHistorySchema,
@@ -1450,5 +1451,73 @@ describe("the provider surface", () => {
 
     gated.release();
     await running;
+  });
+
+  // -- the residency decision, amendment A17 --------------------------------
+
+  /**
+   * A listing that reports absurd sizes, so the verdict does not depend on how
+   * much memory the machine running the suite happens to have.
+   */
+  async function sizedUpstream(
+    entries: ReadonlyArray<readonly [string, number]>,
+  ): Promise<{ baseUrl: string }> {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          models: entries.map(([name, size]) => ({ name, model: name, size })),
+          data: entries.map(([name]) => ({ id: name })),
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    return { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+  }
+
+  interface ResidencyPayload {
+    residency: { configured: string; policy: string; reason: string };
+  }
+
+  it("carries the resolved residency policy and the signal behind it", async () => {
+    // Neither the author nor the user can inspect the cobuilder's machine, so a
+    // heuristic they cannot see is one they cannot debug. It has to cross IPC.
+    const server = await upstream();
+    registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const view = unwrap<ResidencyPayload>(await invoke(CHANNELS.getProvider));
+
+    expect(view.residency.configured).toBe("auto");
+    // The shipped default binds one model to both roles, so there is nothing to
+    // swap and nothing to pay.
+    expect(view.residency.policy).toBe("concurrent");
+    expect(view.residency.reason).toContain(DEFAULT_HARNESS_CONFIG.models.generator);
+  });
+
+  it("re-resolves the residency after a rebind rather than answering from a cache", async () => {
+    const server = await sizedUpstream([
+      [DEFAULT_HARNESS_CONFIG.models.generator, 900e9],
+      ["huge-critic", 900e9],
+    ]);
+    registerProviders(
+      { ollama: createStubClient({ models: [] }), lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    expect(unwrap<ResidencyPayload>(await invoke(CHANNELS.getProvider)).residency.policy).toBe(
+      "concurrent",
+    );
+
+    unwrap<void>(await invoke(CHANNELS.bindModel, "critic", "huge-critic"));
+
+    const view = unwrap<ResidencyPayload>(await invoke(CHANNELS.getProvider));
+    expect(view.residency.policy).toBe("sequential");
+    expect(view.residency.reason).toContain("900.0 GB");
   });
 });

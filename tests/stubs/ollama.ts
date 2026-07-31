@@ -61,7 +61,7 @@ import type { ChatMessage, ChatTurn, ToolDef } from "@shared/schema";
  * records the empty string.
  */
 export interface RecordedCall {
-  method: "generate" | "vision" | "chatWithTools" | "listModels";
+  method: "generate" | "vision" | "chatWithTools" | "listModels" | "release";
   model: string;
   system?: string;
   prompt?: string;
@@ -109,6 +109,17 @@ export interface StubScript {
   vision?: ReadonlyArray<string | Error>;
   chatWithTools?: ReadonlyArray<ChatTurn | Error>;
   models?: readonly string[] | Error;
+  /**
+   * Evictions — A17. Entries are consumed in call order and an `Error` makes
+   * that unload fail, which is the case worth scripting: a failed release must
+   * leave the run alive, since the model staying resident is the situation the
+   * policy was trying to improve rather than a reason to discard a long run.
+   *
+   * Absent means every release succeeds. It does **not** mean `release` is
+   * missing from the client — that is `LlmClient`'s optional method and a
+   * different test.
+   */
+  release?: ReadonlyArray<undefined | Error>;
 }
 
 export interface StubClient extends OllamaClient {
@@ -197,6 +208,7 @@ export function createStubClient(script: StubScript): StubClient {
   const generateQueue = new ResponseQueue("generate", script.generate);
   const visionQueue = new ResponseQueue("vision", script.vision);
   const chatQueue = new ResponseQueue("chatWithTools", script.chatWithTools);
+  let releaseCursor = 0;
 
   /** Only the fields this call actually carried — an absent key stays absent. */
   function record(call: RecordedCall): void {
@@ -227,6 +239,23 @@ export function createStubClient(script: StubScript): StubClient {
       generateQueue.reset();
       visionQueue.reset();
       chatQueue.reset();
+      releaseCursor = 0;
+    },
+
+    async release(model: string): Promise<void> {
+      // Recorded before the queue is consulted, so a scripted failure still
+      // appears in the trace — the call happened; it is the unload that did not.
+      record({ method: "release", model });
+      // Deliberately not a `ResponseQueue`: that throws when its script is
+      // absent, which is right for `generate` — a call with nothing scripted is
+      // a test bug — and wrong here. Almost every residency test cares only
+      // about *which* models were evicted and *when*, so an unscripted release
+      // must succeed rather than fail the run it is not the subject of.
+      const entries = script.release;
+      if (entries === undefined || entries.length === 0) return;
+      const entry = entries[Math.min(releaseCursor, entries.length - 1)];
+      releaseCursor++;
+      if (entry instanceof Error) throw entry;
     },
 
     async listModels(): Promise<string[]> {

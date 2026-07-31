@@ -107,6 +107,7 @@ import { draft } from "@main/draft";
 import { appendRound, completeRound, createHistory, roundAt } from "@main/history";
 import { lint } from "@main/lint";
 import type { OllamaClient } from "@main/ollama";
+import type { ResidencyRunner } from "@main/residency";
 import { revise } from "@main/revise";
 import { diff, type Grid } from "@shared/grid";
 import {
@@ -141,6 +142,17 @@ export interface PipelineDeps {
    * Electron-free and the stub-driven tests disk-free.
    */
   persist?: (h: SessionHistory) => Promise<void>;
+  /**
+   * Who is allowed to be resident, and when the outgoing model is evicted —
+   * amendment A17.
+   *
+   * Optional, and absent is the shipped case: both roles default to one model,
+   * so there is never a second model to unload and the runner would have nothing
+   * to do. `run()` calls `enter()` immediately before each stage rather than
+   * after it, because the point is to free the memory *before* the call that
+   * needs it — evicting afterwards pays the same cold load a beat later.
+   */
+  residency?: ResidencyRunner;
 }
 
 export interface PipelineInput {
@@ -523,6 +535,9 @@ async function runLoop(ctx: Ctx, entry: LoopEntry): Promise<SessionHistory> {
     let report: CritiqueReport;
     let critiqueMs: number;
     try {
+      // A17. Before the call, not after: the memory has to be free when the
+      // critic loads, and it names the model being *left*, not the one entered.
+      await ctx.deps.residency?.enter(ctx.config.models.critic);
       const started = performance.now();
       report = await critique(ctx.deps, doc, lintReport, ctx.config);
       critiqueMs = performance.now() - started;
@@ -578,6 +593,8 @@ async function runLoop(ctx: Ctx, entry: LoopEntry): Promise<SessionHistory> {
     let reviseMs: number;
     let summary: ReviseSummary;
     try {
+      // A17. Revise runs on the generator, so this is where the critic is left.
+      await ctx.deps.residency?.enter(ctx.config.models.generator);
       const started = performance.now();
       const result = await revise(
         {
@@ -680,6 +697,9 @@ export async function run(
   setState(ctx, "DRAFTING", 0);
 
   let doc: SpriteDoc;
+  // A17. The run's first stage. Nothing is resident yet, so this evicts nothing
+  // and only records what the generator is about to load.
+  await deps.residency?.enter(config.models.generator);
   const started = performance.now();
   try {
     doc = await draft(
@@ -761,6 +781,8 @@ export async function applyFeedback(
   let reviseMs: number;
   let summary: ReviseSummary;
   try {
+    // A17. §7.3 travels the same stages as §7.2, so it gets the same eviction.
+    await deps.residency?.enter(config.models.generator);
     const started = performance.now();
     const result = await revise(
       {

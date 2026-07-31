@@ -411,6 +411,40 @@ const ModelsSchema = z
   });
 
 /**
+ * Whether the two roles may hold their models in memory at once — amendment A17.
+ *
+ * **This module is otherwise closed** (see the header of `preload/index.ts`, which
+ * declares `Api` elsewhere for exactly that reason). Reopening it is deliberate
+ * and minimal: A17's policy is a `HarnessConfig` field, §6.8's config is the one
+ * thing serialized into every `SessionHistory` so two runs can be compared, and a
+ * residency policy that did not travel with the config would make a 50-second
+ * difference in a benchmark unattributable — which is the sentence §6.8 uses to
+ * justify its own existence. One enum and one field; nothing else here changed.
+ *
+ * Three values, and the third is the interesting one:
+ *
+ * - **`"concurrent"`** — both models stay resident. Fast, and what every capture
+ *   in this project was measured under.
+ * - **`"sequential"`** — the outgoing model is unloaded before the incoming one
+ *   is called. Costs a cold load per switch: **15.7 s cold against 5.9 s warm**
+ *   (`captures/2026-07-30-wave-8b-determinism.txt`), so roughly 10 s per switch
+ *   and 50 s across a 3-round run, which is a real cost and must never be paid
+ *   when it is not needed.
+ * - **`"auto"`** — resolve it from the machine. The default, because the
+ *   shipped binding puts **one model in both roles**, where the policy is a
+ *   no-op whatever it says: `main/residency.ts` returns `"concurrent"` for that
+ *   case before it looks at anything else, and issues no request at all.
+ *
+ * `"auto"` is the default rather than `"concurrent"` because the config that
+ * actually needs a decision is one a cobuilder made deliberately — two different
+ * models on a host that cannot hold both — and that is precisely the person who
+ * should not have to discover a second setting to make the first one work.
+ */
+export const MODEL_RESIDENCY_POLICIES = ["auto", "sequential", "concurrent"] as const;
+
+export const ModelResidencySchema = z.enum(MODEL_RESIDENCY_POLICIES).default("auto");
+
+/**
  * **Strict.** §6.8 exists so two benchmark runs can be compared, and the config
  * is serialized into every `SessionHistory` to make that possible. A lenient
  * object silently drops a key it does not recognize and substitutes today's
@@ -555,6 +589,13 @@ export const HarnessConfigSchema = z.strictObject({
    * value that large is a units mistake rather than an intention.
    */
   temperature: z.number().min(0).max(2).default(0.6),
+  /**
+   * How the two roles share memory — amendment A17. See `ModelResidencySchema`.
+   *
+   * Beside `models` rather than inside it, because it is a statement about the
+   * *pair* rather than about either binding, and `ModelsSchema` is strict.
+   */
+  modelResidency: ModelResidencySchema,
   models: ModelsSchema,
 });
 
@@ -878,6 +919,8 @@ export type CritiqueReport = z.infer<typeof CritiqueReportSchema>;
 export type LintCode = (typeof LINT_CODES)[number];
 export type LintWarning = z.infer<typeof LintWarningSchema>;
 export type LintReport = z.infer<typeof LintReportSchema>;
+/** A17's three policies. `"auto"` is a question; the other two are answers. */
+export type ModelResidency = (typeof MODEL_RESIDENCY_POLICIES)[number];
 export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
 export type PipelineState = z.infer<typeof PipelineStateSchema>;
 export type StopReason = z.infer<typeof StopReasonSchema>;
@@ -914,6 +957,9 @@ export const DEFAULT_HARNESS_CONFIG: HarnessConfig = {
   // same fox.
   seed: null,
   temperature: 0.6,
+  // A17. `"auto"`, which for the binding below resolves to `"concurrent"` with
+  // no probe and no eviction — one model in both roles has nothing to swap.
+  modelResidency: "auto",
   // Both roles, one model — see `ModelsSchema`. `qwen3:8b` cannot draw.
   models: {
     generator: "qwen3-vl:8b-instruct-q4_K_M",

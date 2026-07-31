@@ -956,6 +956,73 @@ describe("chatWithTools", () => {
 });
 
 // ---------------------------------------------------------------------------
+// release — model residency, spec amendment A17
+// ---------------------------------------------------------------------------
+
+/**
+ * Evicting a resident model, and the falsy zero that is the whole mechanism.
+ *
+ * `keep_alive: 0` is what Ollama reads as "unload now" — verified live: a
+ * resident 10 GB model left `ollama ps` within 2s of this exact request. The
+ * hazard is that `0` is falsy, so `if (keepAlive) body.keep_alive = keepAlive`
+ * omits the field, Ollama applies its **5-minute default**, the model stays
+ * resident, and every test that does not read the wire still passes. The feature
+ * would silently do nothing on the one machine it was written for.
+ *
+ * So the assertion below is on the **bytes**: the key is present, its value is
+ * the number `0`, and `"keep_alive":0` appears in the raw body. Asserting that
+ * `release` was called proves nothing — that is exactly what the mutant does.
+ */
+describe("release", () => {
+  it("sends keep_alive: 0 as a present field with the value 0", async () => {
+    const fixture = await startServer(
+      replyJson({ model: "m", response: "", done: true, done_reason: "unload" }),
+    );
+
+    await createOllamaClient(fixture.baseUrl).release?.("qwen3:8b-q4_K_M");
+
+    const [request] = fixture.requests;
+    expect(request.method).toBe("POST");
+    expect(request.url).toBe("/api/generate");
+    expect(request.body.model).toBe("qwen3:8b-q4_K_M");
+    // Three assertions, because a truthiness guard passes the first two ways of
+    // writing this: the key exists, its value is `0`, and the wire says so.
+    expect(Object.keys(request.body)).toContain("keep_alive");
+    expect(request.body.keep_alive).toBe(0);
+    expect(request.raw).toContain('"keep_alive":0');
+  });
+
+  it("sends no prompt — this is an unload, not a generation", async () => {
+    const fixture = await startServer(replyJson({ done_reason: "unload" }));
+
+    await createOllamaClient(fixture.baseUrl).release?.("m");
+
+    // The verified request is `{model, keep_alive: 0}` and nothing else. A
+    // prompt here would cost an inference to evict a model.
+    expect(Object.keys(fixture.requests[0].body).sort()).toEqual(["keep_alive", "model"]);
+  });
+
+  it("throws on a non-2xx, so the caller decides whether it matters", async () => {
+    // The residency runner swallows this; the client does not. A client that
+    // swallowed it would make "eviction is failing on this machine" unobservable
+    // from anywhere.
+    const fixture = await startServer(replyJson({ error: "no such model" }, 404));
+
+    await expect(createOllamaClient(fixture.baseUrl).release?.("ghost")).rejects.toBeInstanceOf(
+      OllamaHttpError,
+    );
+  });
+
+  it("reports an unreachable server the way every other call does", async () => {
+    const baseUrl = await closedPortBaseUrl();
+
+    await expect(createOllamaClient(baseUrl).release?.("m")).rejects.toBeInstanceOf(
+      OllamaUnreachableError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // errors — spec §6.9, §9
 // ---------------------------------------------------------------------------
 
