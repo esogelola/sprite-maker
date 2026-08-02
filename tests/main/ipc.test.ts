@@ -37,6 +37,8 @@
 
 import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +57,12 @@ import { contextBridge, ipcMain } from "electron";
 
 import { OllamaUnreachableError, type OllamaClient } from "@main/ollama";
 import { CHANNELS, registerIpc, type IpcDeps, type RendererTarget } from "@main/ipc";
+import {
+  createProviderControl,
+  DEFAULT_PROVIDER,
+  type ProviderControl,
+  type ProviderName,
+} from "@main/provider";
 import {
   HarnessConfigSchema,
   PipelineEventSchema,
@@ -147,10 +155,30 @@ let sessionDir: string;
 let target: RendererTarget & { send: ReturnType<typeof vi.fn> };
 let config: HarnessConfig;
 
+/**
+ * A `ProviderControl` over one fixed client — amendment A16.
+ *
+ * `registerIpc` no longer takes a client: it takes the live provider, and reads
+ * `client()` at every use site so a runtime switch takes effect without a
+ * restart. Every test that only cares about the pipeline gets this, which is the
+ * old `client` field with a getter in front of it.
+ */
+function controlFor(client: OllamaClient, baseUrl = "http://127.0.0.1:11434"): ProviderControl {
+  return createProviderControl(
+    { provider: "ollama", baseUrl, source: "configured", probes: [], error: null },
+    () => client,
+  );
+}
+
 /** Register the surface against any client, and hand back the config it shares. */
 function registerClient(client: OllamaClient, overrides: Partial<HarnessConfig> = {}): IpcDeps {
   config = HarnessConfigSchema.parse(overrides);
-  const deps: IpcDeps = { client, config, sessionDir, renderer: () => target };
+  const deps: IpcDeps = {
+    provider: controlFor(client),
+    config,
+    sessionDir,
+    renderer: () => target,
+  };
   registerIpc(deps);
   return deps;
 }
@@ -1063,5 +1091,364 @@ describe("the preload path", () => {
     // output, and `npm test` does not run one.
     if (!existsSync(fromRepo("out/preload"))) return;
     expect(existsSync(fromRepo("out/preload/index.cjs"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the provider surface — amendment A16
+// ---------------------------------------------------------------------------
+
+/**
+ * `getProvider` / `setProvider`, and the one thing that had to change to make
+ * them possible.
+ *
+ * Until A16 `registerIpc({ client, … })` captured the client **by value**, while
+ * `renderer: () => …` was a getter precisely so it could change. Nothing could
+ * re-resolve the provider at runtime, so a switch would have taken effect at the
+ * next restart — silently, which is the worst available outcome: the user
+ * changes the provider, the model list refreshes, the run goes to the old
+ * server, and every surface agrees that it did not.
+ *
+ * So the client is now read through `deps.provider.client()` at every use site,
+ * and the tests below are written to fail against any implementation that caches
+ * it once — including the two subtle ones, where `createModelRegistry` or
+ * `PipelineDeps` was handed the client rather than a live reference.
+ *
+ * **The probe runs against a real server.** `connected` is a claim about a
+ * socket; a stub cannot make it, and pointing the fixture at
+ * `127.0.0.1:11434` would make the suite pass or fail depending on whether the
+ * author's own Ollama happened to be running.
+ */
+describe("the provider surface", () => {
+  const servers: Server[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      servers.splice(0).map(
+        (server) =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections();
+            server.close(() => resolve());
+          }),
+      ),
+    );
+  });
+
+  /** A server that answers any listing path in both dialects. */
+  async function upstream(): Promise<{ baseUrl: string; paths: string[] }> {
+    const paths: string[] = [];
+    const server = createServer((req, res) => {
+      paths.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ models: [{ name: "m" }], data: [{ id: "m" }] }));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    return { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, paths };
+  }
+
+  async function closedPort(): Promise<string> {
+    const server = createServer();
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = server.address() as AddressInfo;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return `http://127.0.0.1:${port}`;
+  }
+
+  /**
+   * Register the surface with a different scripted client per provider.
+   *
+   * The factory is the whole instrument: whichever client answers a later call
+   * tells you which provider the surface is actually using, without anything
+   * having to inspect an object that is deliberately opaque.
+   */
+  function registerProviders(
+    clients: Record<ProviderName, OllamaClient>,
+    initial: { provider: ProviderName; baseUrl: string; source?: "configured" | "detected" | "fallback"; error?: string | null; probes?: never[] },
+  ): ProviderControl {
+    config = HarnessConfigSchema.parse({});
+    const control = createProviderControl(
+      {
+        provider: initial.provider,
+        baseUrl: initial.baseUrl,
+        source: initial.source ?? "configured",
+        probes: initial.probes ?? [],
+        error: initial.error ?? null,
+      },
+      (provider) => clients[provider],
+    );
+    registerIpc({ provider: control, config, sessionDir, renderer: () => target });
+    return control;
+  }
+
+  it("reports the current provider, its URL and how it was chosen", async () => {
+    const server = await upstream();
+    registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl, source: "detected" },
+    );
+
+    const view = unwrap<{
+      provider: string;
+      baseUrl: string;
+      source: string;
+      connected: boolean;
+      error: string | null;
+    }>(await invoke(CHANNELS.getProvider));
+
+    expect(view.provider).toBe("ollama");
+    expect(view.baseUrl).toBe(server.baseUrl);
+    expect(view.source).toBe("detected");
+    expect(view.connected).toBe(true);
+    expect(view.error).toBeNull();
+    // The listing path the client already speaks, not a second health endpoint.
+    expect(server.paths[0]).toBe("/api/tags");
+  });
+
+  it("reports a detection failure without the app having refused to start", async () => {
+    // §6.7 flattens errors to one string and this is the only diagnostic that
+    // reaches another machine. It must survive the trip to the renderer intact.
+    registerProviders(
+      { ollama: createStubClient({}), lmstudio: createStubClient({}) },
+      {
+        provider: "ollama",
+        baseUrl: await closedPort(),
+        source: "fallback",
+        error: "no model server answered — tried ollama at … and lmstudio at …",
+      },
+    );
+
+    const view = unwrap<{ source: string; connected: boolean; error: string | null }>(
+      await invoke(CHANNELS.getProvider),
+    );
+
+    expect(view.source).toBe("fallback");
+    expect(view.connected).toBe(false);
+    expect(view.error).toContain("no model server answered");
+  });
+
+  it("switches the client, so the very next call goes to the new provider", async () => {
+    const ollama = createStubClient({ models: ["ollama-only"] });
+    const lmstudio = createStubClient({ models: ["lmstudio-only"] });
+    const server = await upstream();
+    registerProviders({ ollama, lmstudio }, { provider: "ollama", baseUrl: server.baseUrl });
+
+    expect(unwrap<string[]>(await invoke(CHANNELS.listModels))).toEqual(["ollama-only"]);
+
+    const view = unwrap<{ provider: string; baseUrl: string; source: string }>(
+      await invoke(CHANNELS.setProvider, "lmstudio", server.baseUrl),
+    );
+    expect(view.provider).toBe("lmstudio");
+    expect(view.source).toBe("configured");
+
+    // The registry was built once, at registration, from a client that no longer
+    // exists. Reading through `deps.provider.client()` is what makes this pass.
+    expect(unwrap<string[]>(await invoke(CHANNELS.listModels))).toEqual(["lmstudio-only"]);
+  });
+
+  it("routes a whole run through the client the switch installed", async () => {
+    // The second place a captured client hides: `PipelineDeps.client`, built in
+    // `registerIpc`'s prologue and handed to `run` minutes later.
+    const ollama = createStubClient(ONE_ROUND);
+    const lmstudio = createStubClient(ONE_ROUND);
+    const server = await upstream();
+    registerProviders({ ollama, lmstudio }, { provider: "ollama", baseUrl: server.baseUrl });
+
+    unwrap(await invoke(CHANNELS.setProvider, "lmstudio", server.baseUrl));
+    unwrap<SessionHistory>(await invoke(CHANNELS.run, INPUT));
+
+    expect(lmstudio.calls.some((c) => c.method === "generate")).toBe(true);
+    expect(ollama.calls.some((c) => c.method === "generate")).toBe(false);
+  });
+
+  it("refuses a switch while a run holds the session, and says busy", async () => {
+    // Rule 5. §12 puts a run at minutes, so this window is long and real — and a
+    // switch that appeared to work while the run kept calling the old server
+    // would be the Accept-that-did-not-happen defect wearing a provider hat.
+    const gated = gateAtRevise(TWO_ROUNDS);
+    const lmstudio = createStubClient({ models: ["lmstudio-only"] });
+    const server = await upstream();
+    const control = registerProviders(
+      { ollama: gated.client, lmstudio },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const running = invoke(CHANNELS.run, INPUT);
+    await gated.reached;
+
+    const refused = await invoke(CHANNELS.setProvider, "lmstudio", server.baseUrl);
+    expect(refused).toMatchObject({ ok: false, code: "busy" });
+    // And it is a refusal, not a slow success: the provider did not move.
+    expect(control.status().provider).toBe("ollama");
+
+    gated.release();
+    unwrap<SessionHistory>(await running);
+    expect(control.status().provider).toBe("ollama");
+  });
+
+  it("rejects an unknown provider name without changing anything", async () => {
+    const server = await upstream();
+    const control = registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const result = await invoke(CHANNELS.setProvider, "lmstduio", server.baseUrl);
+
+    expect(result).toMatchObject({ ok: false, code: "bad-provider" });
+    expect(result.message).toContain("lmstduio");
+    expect(result.message).toContain("ollama");
+    expect(result.message).toContain("lmstudio");
+    expect(control.status().provider).toBe(DEFAULT_PROVIDER);
+    expect(control.status().baseUrl).toBe(server.baseUrl);
+  });
+
+  it("rejects a base URL that is not one, rather than building a client that cannot work", async () => {
+    const server = await upstream();
+    const control = registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const result = await invoke(CHANNELS.setProvider, "lmstudio", "127.0.0.1:1234");
+
+    // A host with no scheme is the single most likely thing to be typed into the
+    // field, and `fetch` rejects it as an invalid URL at every call site
+    // afterwards — a failure that reads as "LM Studio is down".
+    expect(result).toMatchObject({ ok: false, code: "bad-url" });
+    expect(result.message).toContain("127.0.0.1:1234");
+    expect(control.status().provider).toBe("ollama");
+  });
+
+  it("reads an empty base URL as the provider's default, not as a URL", async () => {
+    const server = await upstream();
+    registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({ models: [] }) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const view = unwrap<{ baseUrl: string }>(await invoke(CHANNELS.setProvider, "lmstudio", ""));
+
+    // Clearing the field means "wherever LM Studio normally is", which is the
+    // only reading that does not require the user to memorise a port.
+    expect(view.baseUrl).toBe("http://127.0.0.1:1234");
+  });
+
+  it("names the bound models the new provider does not have", async () => {
+    // The stale-binding decision. `qwen3-vl:8b-instruct-q4_K_M` is an Ollama tag;
+    // the same weights on LM Studio are `qwen3-vl-8b-instruct`, and a binding
+    // carried across the switch in silence would 404 inside the next run.
+    const server = await upstream();
+    registerProviders(
+      {
+        ollama: createStubClient({ models: ["qwen3-vl:8b-instruct-q4_K_M"] }),
+        lmstudio: createStubClient({ models: ["qwen3-vl-8b-instruct"] }),
+      },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const view = unwrap<{
+      unavailable: { role: string; model: string }[];
+      connected: boolean;
+    }>(await invoke(CHANNELS.setProvider, "lmstudio", server.baseUrl));
+
+    expect(view.connected).toBe(true);
+    expect(view.unavailable).toEqual([
+      { role: "generator", model: "qwen3-vl:8b-instruct-q4_K_M" },
+      { role: "critic", model: "qwen3-vl:8b-instruct-q4_K_M" },
+    ]);
+  });
+
+  it("reports nothing unavailable when the new provider has the bound models", async () => {
+    const server = await upstream();
+    registerProviders(
+      {
+        ollama: createStubClient({ models: ["qwen3-vl:8b-instruct-q4_K_M"] }),
+        lmstudio: createStubClient({ models: ["qwen3-vl:8b-instruct-q4_K_M", "other"] }),
+      },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const view = unwrap<{ unavailable: unknown[] }>(
+      await invoke(CHANNELS.setProvider, "lmstudio", server.baseUrl),
+    );
+    expect(view.unavailable).toEqual([]);
+  });
+
+  it("does not claim a binding is fine when the new server never answered", async () => {
+    const dead = await closedPort();
+    registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({ models: [] }) },
+      { provider: "ollama", baseUrl: (await upstream()).baseUrl },
+    );
+
+    const view = unwrap<{
+      connected: boolean;
+      error: string | null;
+      unavailable: unknown[];
+    }>(await invoke(CHANNELS.setProvider, "lmstudio", dead));
+
+    expect(view.connected).toBe(false);
+    // The endpoint, in full — the difference between "the server is not running"
+    // and "the port I typed is wrong".
+    expect(view.error).toContain(`${dead}/v1/models`);
+    // Empty because it is unknown, and the `connected: false` beside it is what
+    // says so. Listing the bindings as "available" would be a claim nothing
+    // checked.
+    expect(view.unavailable).toEqual([]);
+  });
+
+  it("switches even when the new server is unreachable, so the URL can be corrected", async () => {
+    // The user typed the wrong port. Refusing the switch would leave the row
+    // showing the old provider while the field showed the new URL, and there
+    // would be no way to fix the field without the app agreeing to move first.
+    const dead = await closedPort();
+    const control = registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({ models: [] }) },
+      { provider: "ollama", baseUrl: (await upstream()).baseUrl },
+    );
+
+    unwrap(await invoke(CHANNELS.setProvider, "lmstudio", dead));
+
+    expect(control.status().provider).toBe("lmstudio");
+    expect(control.status().baseUrl).toBe(dead);
+  });
+
+  it("strips a trailing slash so the endpoint does not double its separator", async () => {
+    const server = await upstream();
+    registerProviders(
+      { ollama: createStubClient({ models: ["m"] }), lmstudio: createStubClient({ models: [] }) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const view = unwrap<{ baseUrl: string }>(
+      await invoke(CHANNELS.setProvider, "lmstudio", `${server.baseUrl}/`),
+    );
+    expect(view.baseUrl).toBe(server.baseUrl);
+  });
+
+  it("keeps getProvider readable while a run holds the session", async () => {
+    // A read, never `exclusive`: §12 puts a run at minutes, and a provider row
+    // that could not say which provider was running until the run finished would
+    // be blank for the entire time it mattered.
+    const gated = gateAtRevise(TWO_ROUNDS);
+    const server = await upstream();
+    registerProviders(
+      { ollama: gated.client, lmstudio: createStubClient({}) },
+      { provider: "ollama", baseUrl: server.baseUrl },
+    );
+
+    const running = invoke(CHANNELS.run, INPUT);
+    await gated.reached;
+
+    const view = unwrap<{ provider: string }>(await invoke(CHANNELS.getProvider));
+    expect(view.provider).toBe("ollama");
+
+    gated.release();
+    await running;
   });
 });

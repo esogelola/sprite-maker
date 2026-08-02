@@ -69,10 +69,20 @@ import {
   OllamaHttpError,
   OllamaTimeoutError,
   OllamaUnreachableError,
-  type OllamaClient,
+  type LlmClient,
 } from "@main/ollama";
 import { MODEL_ROLES, createModelRegistry, type ModelRole } from "@main/models";
 import { accept, applyFeedback, run, type PipelineDeps, type PipelineInput } from "@main/pipeline";
+import {
+  describeProbeFailure,
+  isProviderName,
+  modelsEndpoint,
+  normalizeBaseUrl,
+  PROBE_TIMEOUT_MS,
+  PROVIDERS,
+  type ProviderControl,
+  type ProviderName,
+} from "@main/provider";
 import { GridError, diff, setPixel as setGridPixel } from "@shared/grid";
 import { listPalettes } from "@shared/palettes";
 import {
@@ -87,7 +97,7 @@ import {
   type SpriteDoc,
 } from "@shared/schema";
 
-import type { Api, ExportScale, Result } from "../preload/index";
+import type { Api, ExportScale, ProviderView, Result } from "../preload/index";
 
 // ---------------------------------------------------------------------------
 // the channel table
@@ -110,6 +120,8 @@ export const CHANNELS = {
   bindModel: "bind-model",
   getConfig: "get-config",
   getPalettes: "get-palettes",
+  getProvider: "get-provider",
+  setProvider: "set-provider",
   run: "run",
   applyFeedback: "apply-feedback",
   accept: "accept",
@@ -138,8 +150,18 @@ export interface RendererTarget {
 }
 
 export interface IpcDeps {
-  /** The sole HTTP boundary (§5.2). Injected, so the surface is stub-testable. */
-  client: OllamaClient;
+  /**
+   * The provider this process is talking to — amendment A16.
+   *
+   * **Not a client.** It used to be one, captured by value, while
+   * `renderer: () => …` beside it was a getter precisely so it could change —
+   * which meant nothing could re-resolve the provider at runtime and a switch
+   * would have taken effect at the next restart, silently. Every use site below
+   * reads `deps.provider.client()`; `liveClient` in `registerIpc` is the one
+   * place that indirection lives, so a consumer built once at registration
+   * (`createModelRegistry`, `PipelineDeps`) still follows a switch.
+   */
+  provider: ProviderControl;
   /**
    * The live config. **Mutated in place by `bindModel`**, via the registry's
    * write-through (`models.ts`): a run must call the model the picker chose, and
@@ -442,6 +464,55 @@ function parseModelName(raw: unknown): string {
   return raw;
 }
 
+/** One of A16's provider names, or a `bad-provider` failure. */
+function parseProvider(raw: unknown): ProviderName {
+  if (!isProviderName(raw)) {
+    throw new IpcError(
+      "bad-provider",
+      `setProvider: ${JSON.stringify(raw)} is not a provider this app has — expected one of ` +
+        `${PROVIDERS.map((p) => `'${p}'`).join(", ")}`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * A base URL, or a `bad-url` failure. **Empty means that provider's default.**
+ *
+ * Clearing the field is how the row says "wherever this provider normally is",
+ * and it is the only reading that does not require the user to have memorised a
+ * port. Everything else is parsed, because a host with no scheme —
+ * `127.0.0.1:1234`, the single most likely thing to be typed here — is not a URL
+ * `fetch` will take, and a client built from one fails at every call afterwards
+ * with a message that reads as *"LM Studio is down"*.
+ */
+function parseBaseUrl(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") {
+    throw new IpcError("bad-url", `setProvider: base URL must be a string, got ${String(raw)}`);
+  }
+  const normalized = normalizeBaseUrl(raw);
+  if (normalized === null) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new IpcError(
+      "bad-url",
+      `setProvider: ${JSON.stringify(raw)} is not a URL — it needs a scheme, ` +
+        'as in "http://127.0.0.1:1234"',
+    );
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new IpcError(
+      "bad-url",
+      `setProvider: ${JSON.stringify(raw)} is not an http(s) URL — the model server speaks HTTP`,
+    );
+  }
+  return normalized;
+}
+
 function parseCoord(raw: unknown, name: string): number {
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) {
     // Not a truthiness check: `0` is the first column and the first row.
@@ -607,7 +678,24 @@ export function registerIpc(deps: IpcDeps): void {
   inFlight = null;
   const gen = ++generation;
 
-  const registry = createModelRegistry(deps.client, deps.config);
+  /**
+   * The client, resolved per call — amendment A16.
+   *
+   * The one place the provider indirection lives. `createModelRegistry` and
+   * `PipelineDeps` are both built here, once, and both would otherwise hold the
+   * client that existed at registration: after a provider switch the picker
+   * would list the old server's models and the run would call it, while every
+   * surface said the new provider was in use. Wrapping instead of rebuilding
+   * means a consumer cannot opt out of the indirection by being written later.
+   */
+  const liveClient: LlmClient = {
+    listModels: () => deps.provider.client().listModels(),
+    generate: (req) => deps.provider.client().generate(req),
+    vision: (req) => deps.provider.client().vision(req),
+    chatWithTools: (req) => deps.provider.client().chatWithTools(req),
+  };
+
+  const registry = createModelRegistry(liveClient, deps.config);
 
   /** Where pipeline events go — rule 2. The only `webContents.send` in the app. */
   function emit(event: PipelineEvent): void {
@@ -617,7 +705,7 @@ export function registerIpc(deps: IpcDeps): void {
   }
 
   const pipelineDeps: PipelineDeps = {
-    client: deps.client,
+    client: liveClient,
     onEvent: emit,
     // §9: history is written after every round, so at most one round is lost to
     // a crash. `pipeline.ts` guards every call, so a full disk is recorded on
@@ -663,6 +751,118 @@ export function registerIpc(deps: IpcDeps): void {
   }));
 
   ipcMain.handle(CHANNELS.getPalettes, async () => listPalettes());
+
+  // -- the provider — amendment A16 -----------------------------------------
+
+  /**
+   * Is the current provider answering, and do the bound models exist on it?
+   *
+   * Two questions rather than one, because they fail differently and the surface
+   * has to tell them apart: a server that is not there is a URL or a stopped
+   * process, and a server that is there without the bound model is a binding to
+   * re-pick. Both are asked here rather than in the renderer because both are
+   * claims about a socket, and §5.1 makes the renderer pure presentation.
+   *
+   * The probe comes first and is **bounded** (`PROBE_TIMEOUT_MS`). `listModels`
+   * has no deadline of its own — nothing in `LlmClient` does, because a model
+   * call is measured in minutes (§6.8) — so calling it against a firewalled host
+   * would hang the provider row for as long as the host felt like holding the
+   * socket open. A probe that answered means the next call will too.
+   */
+  async function inspect(): Promise<ProviderView> {
+    const status = deps.provider.status();
+    const endpoint = modelsEndpoint(status.provider, status.baseUrl);
+    const base = {
+      provider: status.provider,
+      baseUrl: status.baseUrl,
+      source: status.source,
+      probes: status.probes.map((probe) => ({ ...probe })),
+    };
+
+    let reachable: { ok: true } | { ok: false; detail: string };
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      });
+      try {
+        await response.body?.cancel();
+      } catch {
+        // The socket is closing anyway; that is not a fact about the server.
+      }
+      reachable = response.ok ? { ok: true } : { ok: false, detail: `HTTP ${response.status}` };
+    } catch (error) {
+      // The same phrasing detection uses, and for the same measured reason:
+      // Electron's `fetch` is Chromium's and hides the errno one level down, so
+      // `error.message` alone is the word "failed".
+      reachable = { ok: false, detail: describeProbeFailure(error, PROBE_TIMEOUT_MS) };
+    }
+
+    if (!reachable.ok) {
+      return {
+        ...base,
+        connected: false,
+        // A detection failure already names both providers and both URLs, and
+        // that is the more useful sentence — it is why the app is pointing here
+        // at all. A connection failure names the endpoint actually tried, which
+        // is the difference between "not running" and "wrong port".
+        error: status.error ?? `${endpoint} did not answer — ${reachable.detail}`,
+        // Deliberately empty rather than "all fine": nothing checked. The
+        // `connected: false` beside it is what says so.
+        unavailable: [],
+      };
+    }
+
+    let installed: string[];
+    try {
+      installed = await registry.list();
+    } catch (error) {
+      return { ...base, connected: false, error: errorMessage(error), unavailable: [] };
+    }
+
+    // The stale-binding decision (A16). The binding is **kept and reported**,
+    // never silently carried: `ModelPickers` already renders a bound-but-missing
+    // model as `(not installed)` and disabled, so keeping it is what lets the
+    // picker keep telling the truth about what the next run would call — while
+    // this list is what disables Generate until the user re-picks.
+    const bound = registry.roles();
+    const unavailable = MODEL_ROLES.filter((role) => !installed.includes(bound[role])).map(
+      (role) => ({ role, model: bound[role] }),
+    );
+
+    return { ...base, connected: true, error: status.error, unavailable };
+  }
+
+  /**
+   * **Not `exclusive`.** A read, like `getSession`: §12 puts a run at minutes,
+   * and a provider row that could not say which server was running until the run
+   * finished would be blank for the whole time it mattered.
+   */
+  ipcMain.handle(CHANNELS.getProvider, async () => envelope<ProviderView>(() => inspect()));
+
+  /**
+   * Point the app at a provider and URL — a session mutation, so rule 5 applies.
+   *
+   * `exclusive` is what makes a switch during a run answer
+   * `{ok: false, code: "busy"}` instead of swapping the client out from under a
+   * pipeline that is mid-round. Validation happens **before** the switch, so a
+   * rejected argument leaves the provider exactly where it was.
+   *
+   * An unreachable target still switches. Refusing would leave the row showing
+   * the old provider while the field showed the new URL, and no way to correct
+   * the field without the app agreeing to move first — the user typed the wrong
+   * port, and the fix is to type the right one.
+   */
+  ipcMain.handle(CHANNELS.setProvider, async (_event, provider: unknown, baseUrl: unknown) =>
+    envelope<ProviderView>(() =>
+      exclusive("setProvider", async () => {
+        const name = parseProvider(provider);
+        const url = parseBaseUrl(baseUrl);
+        deps.provider.select(name, url);
+        return inspect();
+      }),
+    ),
+  );
 
   // -- the pipeline ---------------------------------------------------------
 

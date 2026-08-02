@@ -44,6 +44,19 @@ import { fileURLToPath } from "node:url";
 
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
 
+/**
+ * Which server this spec talks to, and the model loaded into it — A16.
+ *
+ * `e2e/provider.ts` resolves the provider by calling the app's own
+ * `detectProvider`, so the warm-up lands wherever the app is about to look
+ * rather than at a hardcoded `127.0.0.1:11434`. It also asserts the resolved
+ * server actually has `MODEL`, which is what keeps the warm-up from being a
+ * silent no-op on a machine running LM Studio — where the same weights are
+ * published under a different id.
+ */
+
+import { warmModel } from "./provider";
+
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 const shot = (name: string): string =>
@@ -107,29 +120,6 @@ interface BridgedApi {
 }
 
 /**
- * Load the generator into Ollama before the app starts.
- *
- * Fixture setup, not the thing under test — and run before `electron.launch`
- * rather than after, because a model load is minutes of heavy memory pressure and
- * holding an idle Electron app open across it cost `boot.spec.ts` a renderer.
- */
-async function warmModel(): Promise<void> {
-  const ollama = process.env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434";
-  const response = await fetch(`${ollama}/api/generate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL,
-      prompt: "hi",
-      stream: false,
-      think: false,
-      options: { num_predict: 1 },
-    }),
-  });
-  expect(response.ok, `could not reach Ollama at ${ollama} to warm ${MODEL}`).toBe(true);
-}
-
-/**
  * The canvas, read back out of the DOM in §6.1's encoding.
  *
  * Deliberately reconstructed from `data-ch` on the cells rather than from the
@@ -189,7 +179,7 @@ test("renders a real generation round by round, and paints a cell into the sessi
  * `WANTED_ROUNDS`, so a short session is retried rather than photographed.
  */
 async function runOnce(attempt: number): Promise<number> {
-  await warmModel();
+  const resolved = await warmModel(MODEL);
 
   let app: ElectronApplication | undefined;
   try {
@@ -326,8 +316,9 @@ async function runOnce(attempt: number): Promise<number> {
     await writeFile(
       CAPTURE,
       [
-        "Wave 11 — e2e/canvas.spec.ts, live run against local Ollama",
+        "Wave 11 — e2e/canvas.spec.ts, live run against a local model server",
         `captured:   ${new Date().toISOString()}`,
+        `provider:   ${resolved.provider} at ${resolved.baseUrl} (${resolved.source})`,
         `attempt:    ${attempt} of ${ATTEMPTS}`,
         `prompt:     "${PROMPT}"  ${SIDE}x${SIDE}  palette ${rounds[0].doc.palette.id}`,
         `models:     generator ${bound.generator} / critic ${bound.critic}`,

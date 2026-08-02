@@ -1,0 +1,96 @@
+Is there an OpenAI-API equivalent of Ollama's `think: false`?
+=============================================================
+Date:   2026-07-30
+Why:    Adding LM Studio as a provider. LM Studio speaks OpenAI, which has no
+        `think` field, and spec A8 measured an 86x token reduction from Ollama's
+        native `think: false`. Losing it would be a real regression, so the
+        question was whether an equivalent exists.
+How:    Ollama 0.32.1 ships its own OpenAI-compatible endpoint at
+        /v1/chat/completions. That makes OpenAI-shaped requests testable against
+        the real models on this machine, with the native /api/generate call as a
+        reference. This is not LM Studio, but it is a genuine OpenAI-compatible
+        server, and the model-level behaviour is the same model either way.
+
+RESULT 1 — `reasoning_effort: "none"` IS the equivalent.
+
+  Model qwen3:8b-q4_K_M (hybrid thinking), temperature 0, reasoning-heavy prompt
+  ("A farmer has 17 sheep. All but 9 run away. How many are left? Times 4.")
+
+    request                                   tokens      ms
+    native /api/generate think:false  (REF)       82    2551
+    oai plain                                    600   24472
+    oai reasoning_effort:"none"                   82    3340
+    oai reasoning_effort:"low"                   600   24402
+
+  Token count matches the native reference exactly and the content is identical
+  at the start. Only "none" suppresses; "low" does not. Roughly 7x fewer tokens
+  and 7x faster than plain on this prompt.
+
+  Candidates that DO NOT work, all measured on the short probe:
+
+    oai + "/no_think" in the prompt      204 tok  (WORSE than plain's 180)
+    oai + chat_template_kwargs
+          {enable_thinking:false}        180 tok  (no effect - Ollama ignores it)
+    oai + top-level think:false          180 tok  (no effect - the OAI layer
+                                                   drops the field)
+    oai + assistant prefill
+          "<think>\n\n</think>"           12 tok  (WORKS on the hybrid model, but
+                                                   see result 2 - it is harmful
+                                                   on a non-thinking model, so it
+                                                   is not safe as a default)
+
+  This independently re-confirms the A8 finding that "/no_think" is inert on
+  Qwen 3 - and it is not merely inert over the OpenAI endpoint, it costs MORE
+  tokens than sending nothing, because the directive itself becomes something
+  the model reasons about.
+
+RESULT 2 — THE SHIPPED MODEL CANNOT REASON AT ALL.
+
+    native /api/generate think:true, qwen3-vl:8b-instruct-q4_K_M
+      -> HTTP 400
+         "qwen3-vl:8b-instruct-q4_K_M" does not support thinking
+
+  Every suppression candidate returned an identical 13 tokens on this model,
+  except the assistant prefill, which returned 34 - prefilling a <think> block
+  into a model with no thinking template just injects text it then responds to.
+
+  A8's 86x reduction was measured on qwen3:8b, the model the project later
+  abandoned because the shape-DSL benchmark showed it cannot draw. For the model
+  bound to BOTH roles today, `think` is a no-op. The capability gap is real for
+  the hybrid model and moot for the shipped one. Both halves belong in the
+  record: a future generator swap back to a hybrid model makes it live again.
+
+RESULT 3 — GRAMMAR-CONSTRAINED DECODING WORKS OVER THE OPENAI ENDPOINT.
+
+    oai + response_format:{type:"json_schema",
+                           json_schema:{name,strict:true,schema}}
+      -> valid constrained output, 8 tokens
+
+  This was the larger of the two risks flagged when the provider work started,
+  since A10's row-width invariant depends on it. It works. It remains UNVERIFIED
+  for the draft stage's actual schema - an anyOf over five const-tagged variants
+  with a palette-derived index enum - under llama.cpp's GBNF conversion, which is
+  where that conversion is thinnest. Ollama's constrained decoding is not
+  llama.cpp's, so this result does not transfer to LM Studio unchanged.
+
+CAVEAT — SUPPRESSING REASONING COSTS ACCURACY.
+
+  Same prompt, same constrained schema, one field different:
+
+    reasoning on   -> {"answer": 36}   correct
+    "none"         -> {"answer": 9}    wrong (skipped the second step)
+
+  The draft stage already runs think:false and A10's DSL benchmark passed that
+  way, so this is a documented tradeoff rather than a blocker. It is a reason not
+  to extend reasoning suppression to any stage that has to do arithmetic or
+  multi-step inference without measuring first.
+
+DECISION
+  Map `think === false` to `reasoning_effort: "none"`. Send no field otherwise.
+  It is a standard OpenAI field, so a server that does not implement it ignores
+  it - the cost is tokens, not correctness. Do NOT use assistant prefill: it is
+  measurably harmful on non-thinking models, which includes the one shipped.
+
+RAW
+  Probes: scratchpad/nothink/probe.mjs and confirm.mjs (not committed - they hit
+  a live server and reproduce from the table above in about a minute).

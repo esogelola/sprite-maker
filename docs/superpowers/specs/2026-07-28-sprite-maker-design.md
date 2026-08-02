@@ -510,6 +510,66 @@ Errors: `OllamaUnreachableError(endpoint)`, `OllamaTimeoutError(model, elapsedMs
 
 `OllamaHttpError` covers any non-2xx. Nothing branches on it — it exists because *something* must be thrown, and a bare `Error` would discard the status and endpoint that §9's "bound model not installed" row requires the message to name. On a 404 the message includes the `ollama pull <model>` command that fixes it.
 
+**Amendment A15 — the contract is `LlmClient`, and LM Studio is the second implementation of it.** §13's deferred item 4 ("hosted model adapters behind the existing client interface") was the design's own bet that this boundary would hold. It held: a second provider is one new file, one new selector, and no change to `draft`, `critique`, `revise`, `pipeline`, `ipc` or `models`. The interface is renamed `LlmClient` because it describes a capability — four calls against a model — and not a vendor; `OllamaClient` remains as a deprecated alias so the rename did not have to touch nine files in the commit that added the provider.
+
+`main/provider.ts` is the one construction site. `SPRITE_MAKER_PROVIDER` is `ollama` (default, and the only provider verified end to end) or `lmstudio`; each reads its own base URL from `OLLAMA_BASE_URL` or `LMSTUDIO_BASE_URL`, passed through verbatim so a hostname, an IPv6 literal or a LAN address survives. **An unrecognised value throws at startup.** A run that silently used Ollama when the user asked for something else would produce real numbers attributed to the wrong provider, which is worse than not starting.
+
+LM Studio speaks OpenAI, so `main/lmstudio.ts` translates: `system`+`prompt` into `messages` (system **omitted**, never sent as `""`), the `options` bag onto top-level `temperature` / `seed` / `max_tokens`, `format` into `response_format` (`"json"` → `json_object`; a schema → `json_schema` with `strict: true`), `images` into a `content` array of `data:image/png;base64,…` URIs, and `tool_calls` into the same nesting with `arguments` **stringified** and `type: "function"` added. Everything on the Ollama path is unchanged.
+
+**`think: false` becomes the top-level `reasoning_effort: "none"`.** A8 established that only the native top-level field suppresses; A15 establishes its OpenAI equivalent, measured against Ollama's own `/v1` endpoint on `qwen3:8b-q4_K_M` at temperature 0 (capture: `captures/2026-07-30-reasoning-suppression-openai.txt`):
+
+| Method | generated tokens | ms |
+|---|---|---|
+| native `think: false` (reference) | 82 | 2551 |
+| no suppression | 600 | 24472 |
+| **`reasoning_effort: "none"`** | **82** | **3340** |
+| `reasoning_effort: "low"` | 600 | 24402 |
+| `/no_think` prefix | 204 — worse than nothing | — |
+| `chat_template_kwargs: { enable_thinking: false }` | 180 — no effect | — |
+| top-level `think: false` over `/v1` | 180 — no effect | — |
+
+Content was byte-identical to the reference. As in A8, most spellings that read as correct do nothing — four of the six alternatives above are inert — so the mapping is one line of code and a table of evidence. **`"low"` does not suppress**; this is not a scale to tune. An assistant prefill of an empty `<think>` block also suppresses on a hybrid model but was rejected: on the non-thinking VL model it made output *worse* (34 tokens vs 13), because the model answers the injected block. `think: true` and an omitted `think` both send no field, leaving the server default in force.
+
+Two facts qualify all of this and belong in the record:
+
+- **The model this app actually ships cannot reason at all.** `qwen3-vl:8b-instruct-q4_K_M` — bound to both roles by default — answers native `think: true` with HTTP 400, *"does not support thinking"*. A8's 86× was measured on `qwen3:8b`, which §3 later abandoned because it cannot draw. So on the shipped configuration `think` is a no-op on **both** providers, and A8's saving is currently theoretical. It matters again the moment anyone binds a hybrid generator. A side effect: `tests/live/smoke.test.ts`'s A8 control assertion — "a model with no suppression produces some `thinking`" — now fails against the default model, exactly as its own comment predicted it would when the model's defaults changed. That failure pre-dates this amendment and is a stale test, not a regression.
+- **Suppressing reasoning costs accuracy where reasoning was the point.** The same constrained prompt returned the right answer with reasoning on and the wrong one under `"none"`. §7.4 already runs draft and revise with `think: false` and A10's benchmark was taken that way, so this is a documented trade — and it is the reason `think` stays a per-stage choice rather than becoming a client-wide setting.
+
+**The error classes are shared, and their names now read wrong.** `OllamaUnreachableError` / `OllamaTimeoutError` / `OllamaHttpError` describe *transport*, not a vendor, and both clients throw them: forking a parallel hierarchy would give §9's IPC envelope two vocabularies to flatten and §8's status bar two shapes to render. What is **not** shared is the wording. Each client supplies a `ProviderIdentity`, so an LM Studio failure reads *"LM Studio is unreachable at http://…:1234/v1/models"* with a hint naming `LMSTUDIO_BASE_URL`, and a 404 suggests loading the model in LM Studio rather than an `ollama pull` command the user cannot run. The message is load-bearing beyond aesthetics: §6.7 flattens errors to one string, so after a reload it is the *only* diagnostic left. Renaming the classes is deferred — it touches every consumer and belongs in its own commit.
+
+**What is not yet known.** No live LM Studio instance has run this. The wire format is pinned by a local HTTP server that records the received body, and the `reasoning_effort` and `response_format` behaviours were probed against Ollama's OpenAI-compatible endpoint — which is *an* OpenAI implementation, not LM Studio's. Specifically unverified: that LM Studio accepts these bodies at all; that `strict: true` enforces **A10's draft schema**, an `anyOf` over five `const`-tagged variants, through llama.cpp's GBNF converter (the mechanism was confirmed working on a simple schema, the shape that matters was not); that LM Studio implements `reasoning_effort`; that its `/v1/models` ids are usable as `model` values in the same session; and that a 40-turn revise loop survives it. First failure to look for is an off-shape draft.
+
+**Amendment A16 — the app finds the server, and the provider is a control rather than a variable.** A15 shipped LM Studio behind `SPRITE_MAKER_PROVIDER=lmstudio`, which for the person that provider was written for — a cobuilder developing on Linux against LM Studio — is the same class of thing they were already doing by hand. A16's claim is smaller and more useful: **clone, `npm run dev`, and the editor is talking to whatever is actually running.** `main/provider.ts` gains `detectProvider(env)`, and `registerIpc` takes a `ProviderControl` instead of a client.
+
+`detectProvider` probes **the listing endpoint each client already uses** — `/api/tags` and `/v1/models` — because a 200 there already means "the model server is there and answering", and a dedicated health path would be one more thing to keep true about a server this project does not own. Four properties of the sweep are load-bearing:
+
+| | |
+|---|---|
+| An explicit `SPRITE_MAKER_PROVIDER` **probes nothing** | The user answered the question. Detection that overrode them would attribute a run to a provider they did not choose. |
+| Probes are **concurrent**, each with a **1.5s budget** | A refused connection returns instantly, which is what makes a serial, unbounded sweep look correct on the machine it was written on. A firewalled port that black-holes packets never returns at all, and startup would be a blank window whose symptom points at Electron. |
+| **Ollama wins when both answer** | Every capture in this project was measured against Ollama. A silent switch on a machine running both would invalidate the comparison with every test still green. The preference is `PROVIDERS`' own order, so it cannot drift from the order the errors report. |
+| **Finding nothing is not fatal** | It keeps the default provider, records the diagnostic, and boots — because the fix is the provider row, and refusing to start would mean editing an environment variable to reach the setting that replaces the environment variable. |
+
+That last row is the exact **opposite** of an unknown `SPRITE_MAKER_PROVIDER`, which stays a hard `app.exit(1)`: a typo in a variable cannot be corrected from inside an app that already started against the wrong server, and A15's reasoning for it is unchanged. The two failures look similar and are treated oppositely on purpose.
+
+**The failure message is the whole diagnostic**, because it is what reaches a machine neither author can log into. It names both providers, both endpoints and both errnos, then both remedies:
+
+```
+no model server answered — tried ollama at http://127.0.0.1:11434/api/tags (ECONNREFUSED) and
+lmstudio at http://127.0.0.1:1234/v1/models (ECONNREFUSED). Start Ollama or LM Studio's local
+server, or set the provider and base URL in the app's provider row (the shell equivalent is
+SPRITE_MAKER_PROVIDER with OLLAMA_BASE_URL / LMSTUDIO_BASE_URL)
+```
+
+**`IpcDeps.client` becomes `IpcDeps.provider`, and every consumer reads through it.** `registerIpc({ client, … })` captured the client **by value**, while `renderer: () => …` beside it was a getter precisely so it could change — so nothing could re-resolve the provider at runtime and a switch would have taken effect at the next restart, silently. `registerIpc` now builds one late-binding `LlmClient` that calls `deps.provider.client()` per method, and hands *that* to `createModelRegistry` and `PipelineDeps`; both are constructed once at registration and would otherwise have kept the old server while every surface claimed the new one.
+
+**§9 gains `getProvider` / `setProvider`**, both answering the same `Result<T>` envelope as `bindModel`. `getProvider` is a **read** and deliberately not `exclusive` — §12 puts a run at minutes, and a provider row that could not say which server was running until the run finished would be blank for the whole time it mattered. `setProvider` **is** a session mutation and goes through rule 5, so a switch during a run answers `{ok: false, code: "busy"}` and §8's bar renders it; a switch that appeared to work while the run kept calling the old server is the Accept-that-did-not-happen defect wearing a provider hat. An **empty base URL means that provider's own default**, which is how the row changes provider without carrying a port across — pointing LM Studio at 11434 is the mistake A15 gave each provider its own variable to prevent.
+
+**A switch re-validates the model bindings, and reports rather than repairs.** `qwen3-vl:8b-instruct-q4_K_M` is an Ollama tag; the same weights on LM Studio are `qwen3-vl-8b-instruct`. The binding is **kept** — `ModelPickers` already renders a bound-but-missing model as `(not installed)` and disabled, which is the only way the picker can keep telling the truth about what the next run would call — and every unavailable role is returned on `ProviderView.unavailable`, which **disables Generate** with the model named in the tooltip. Silently carrying the name would surface as a 404 on the first model call of the next run, attributed to the pipeline. When the new server does not answer at all, `unavailable` is empty *because nothing was checked*, and the `connected: false` beside it is what says so.
+
+**What is not yet known, and what A16 does not change.** The Ollama path is unchanged: no new environment variable is required, the default is still Ollama, and a machine running it resolves exactly as before plus one loopback listing call at startup. Everything A15 recorded as unverified about LM Studio remains unverified — no live LM Studio instance has run this, and detection finding LM Studio only proves that something answered `GET /v1/models`. **Nothing here has been run on Linux**, which is the platform it was written for: the concurrency and timeout behaviour is pinned by tests against a `node:http` server that accepts a connection and never answers, which is a model of a firewalled port rather than a firewalled port. Electron's Linux sandbox is a separate unverified caveat — see the README.
+
+
 ---
 
 ## 7. Pipeline and control flow

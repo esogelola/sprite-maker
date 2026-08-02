@@ -66,6 +66,62 @@ export type Result<T> =
 /** The two roles §6.8's `models` object defines. */
 export type ModelRole = "generator" | "critic";
 
+/**
+ * The providers this build has — amendment A16.
+ *
+ * Spelled here rather than imported from `main/provider.ts`, for the reason this
+ * file's rule 4 gives about `PRELOAD_CHANNELS`: a value import would drag
+ * `node:http` and both clients into the preload bundle. `main/ipc.ts` assigns
+ * its own `ProviderName` into this type, so a provider added there and not here
+ * is a compile error at the boundary rather than a runtime surprise.
+ */
+export type ProviderName = "ollama" | "lmstudio";
+
+/** One candidate detection asked, and what it said. */
+export interface ProbeView {
+  provider: ProviderName;
+  baseUrl: string;
+  /** The exact URL requested — the half of a diagnostic a user can act on. */
+  endpoint: string;
+  up: boolean;
+  /** `ECONNREFUSED`, `timed out after 1500ms`, `HTTP 404` — or `null` when up. */
+  detail: string | null;
+}
+
+/**
+ * What the provider row renders — amendment A16.
+ *
+ * Everything here is main's answer, including `connected`, which is a claim
+ * about a socket and therefore not something the renderer may infer. §5.1 makes
+ * the renderer pure presentation; this is the shape that lets it be.
+ */
+export interface ProviderView {
+  provider: ProviderName;
+  baseUrl: string;
+  /**
+   * How this provider was chosen.
+   *
+   * `"fallback"` is detection having found nothing and kept the default, which
+   * is a different sentence from `"detected"` and must not be rendered as one.
+   */
+  source: "configured" | "detected" | "fallback";
+  /** Did the listing endpoint answer just now? */
+  connected: boolean;
+  /** The detection diagnostic or the connection failure, in full. */
+  error: string | null;
+  /** Every candidate detection tried. Empty when the provider was configured. */
+  probes: ProbeView[];
+  /**
+   * Role bindings the current provider does not have.
+   *
+   * `qwen3-vl:8b-instruct-q4_K_M` is an Ollama tag; the same weights on LM Studio
+   * are `qwen3-vl-8b-instruct`. Carrying a binding across a switch in silence
+   * would 404 at the next `run`, minutes into a generation, so the mismatch is
+   * reported at the switch and the surface disables Generate until it is fixed.
+   */
+  unavailable: { role: ModelRole; model: string }[];
+}
+
 /** The PNG scales §4/§13 permit. `3` is not one of them. */
 export type ExportScale = 1 | 4 | 8 | 16;
 
@@ -92,6 +148,26 @@ export interface Api {
   getConfig(): Promise<HarnessConfig>;
   /** The curated palette library (§6.1a). */
   getPalettes(): Promise<Palette[]>;
+  /**
+   * Which server this process is talking to, and whether it is answering (A16).
+   *
+   * An envelope rather than a bare value, because it probes: the read cannot be
+   * satisfied from memory, and "the provider row could not be filled in" is a
+   * different state from "no provider".
+   */
+  getProvider(): Promise<Result<ProviderView>>;
+  /**
+   * Point the app at a provider and base URL — A16.
+   *
+   * An **empty `baseUrl` means that provider's own default**, which is how the
+   * row switches provider without carrying a port across: LM Studio at 11434 is
+   * a mistake neither server can detect.
+   *
+   * A session mutation, so it answers `{ok: false, code: "busy"}` while a run
+   * holds the session (`main/ipc.ts` rule 5) — and the surface renders that
+   * rather than showing a switch that did not happen.
+   */
+  setProvider(provider: ProviderName, baseUrl: string): Promise<Result<ProviderView>>;
   /** Draft and critique until a stop condition fires. Resolves at the gate (§12). */
   run(input: { prompt: string; size: Size; paletteId: string }): Promise<Result<SessionHistory>>;
   /** Re-enter `REVISING` with the user's own words against `roundIndex` (§7.3). */
@@ -148,6 +224,8 @@ export const PRELOAD_CHANNELS = {
   bindModel: "bind-model",
   getConfig: "get-config",
   getPalettes: "get-palettes",
+  getProvider: "get-provider",
+  setProvider: "set-provider",
   run: "run",
   applyFeedback: "apply-feedback",
   accept: "accept",
@@ -169,6 +247,9 @@ const api: Api = {
   bindModel: (role, model) => ipcRenderer.invoke(PRELOAD_CHANNELS.bindModel, role, model),
   getConfig: () => ipcRenderer.invoke(PRELOAD_CHANNELS.getConfig),
   getPalettes: () => ipcRenderer.invoke(PRELOAD_CHANNELS.getPalettes),
+  getProvider: () => ipcRenderer.invoke(PRELOAD_CHANNELS.getProvider),
+  setProvider: (provider, baseUrl) =>
+    ipcRenderer.invoke(PRELOAD_CHANNELS.setProvider, provider, baseUrl),
   run: (input) => ipcRenderer.invoke(PRELOAD_CHANNELS.run, input),
   applyFeedback: (feedback, roundIndex) =>
     ipcRenderer.invoke(PRELOAD_CHANNELS.applyFeedback, feedback, roundIndex),
