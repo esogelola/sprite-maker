@@ -77,6 +77,13 @@ export type ModelRole = "generator" | "critic";
  */
 export type ProviderName = "ollama" | "lmstudio";
 
+/**
+ * What the config asked for — A17. Declared here rather than imported from
+ * `@shared/schema` for the same reason `ModelRole` is: this file is the
+ * boundary's own vocabulary, and the renderer should not reach across it.
+ */
+export type ModelResidency = "auto" | "sequential" | "concurrent";
+
 /** One candidate detection asked, and what it said. */
 export interface ProbeView {
   provider: ProviderName;
@@ -120,6 +127,24 @@ export interface ProviderView {
    * reported at the switch and the surface disables Generate until it is fixed.
    */
   unavailable: { role: ModelRole; model: string }[];
+  /**
+   * Whether both models may be resident at once, and the signal behind it —
+   * amendment A17.
+   *
+   * It crosses the boundary because the machine this protects is one neither the
+   * author nor the user can inspect: a cobuilder's Linux host running LM Studio,
+   * where model sizes are not reported at all and the decision falls back to an
+   * assumption. A heuristic nobody can read is a heuristic nobody can debug, so
+   * `reason` carries the arithmetic in full and the surface renders it verbatim.
+   *
+   * Resolved on read rather than cached — a rebind changes which models are
+   * being weighed, and a stale answer would describe the previous pair.
+   */
+  residency: {
+    configured: ModelResidency;
+    policy: "sequential" | "concurrent";
+    reason: string;
+  };
 }
 
 /** The PNG scales §4/§13 permit. `3` is not one of them. */

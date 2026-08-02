@@ -85,6 +85,25 @@ export const OLLAMA_MODELS_PATH = "/api/tags";
 const MAX_ERROR_BODY = 400;
 
 /**
+ * The `keep_alive` that means **unload now** — spec amendment A17.
+ *
+ * A named constant for one reason, and it is the whole of A17's implementation
+ * risk: **`0` is falsy**. `if (keepAlive) body.keep_alive = keepAlive` omits the
+ * field, Ollama applies its own 5-minute default, the model stays resident, and
+ * every test that does not read the wire still passes — so the feature silently
+ * does nothing on the one machine it was written for. The field is written
+ * unconditionally below, and `tests/main/ollama.test.ts` asserts the key is
+ * *present on the request body* with the value `0`, not merely that `release`
+ * was called.
+ *
+ * Verified live against Ollama 0.32: a resident 10 GB model left `ollama ps`
+ * within 2 s of `POST /api/generate {model, keep_alive: 0}`, and the reply is a
+ * single JSON object with `done_reason: "unload"` — not a stream, so no
+ * `stream: false` is needed and none is sent.
+ */
+export const OLLAMA_EVICT_KEEP_ALIVE = 0;
+
+/**
  * How a provider names itself in the errors a user reads — amendment A15.
  *
  * The three error classes below describe *transport*, not a vendor, and both
@@ -216,6 +235,25 @@ export interface LlmClient {
   generate(req: GenerateRequest): Promise<string>;
   vision(req: VisionRequest): Promise<string>;
   chatWithTools(req: ChatWithToolsRequest): Promise<ChatTurn>;
+  /**
+   * Unload `model` from the server's memory — spec amendment A17.
+   *
+   * **Optional, and that is the design.** A provider with no way to evict is a
+   * *typed absence*: `main/residency.ts` checks for the method and skips, rather
+   * than calling a method that quietly does nothing — which would make "eviction
+   * is not happening on this provider" indistinguishable from "eviction is
+   * happening and not helping".
+   *
+   * Rejects on failure. Deciding that a failed unload is survivable is the
+   * runner's job (it is: the model stays resident, which is the situation the
+   * policy was trying to improve, not a reason to throw away a run) — but a
+   * client that swallowed it would make the failure unobservable from anywhere.
+   *
+   * `signal` is the caller's, as everywhere else in this interface. An unload is
+   * a local, sub-second operation, so the runner gives it a deadline of its own
+   * rather than §6.8's model-call budget, which is measured in minutes.
+   */
+  release?(model: string, signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -598,6 +636,26 @@ export function createOllamaClient(baseUrl: string = DEFAULT_OLLAMA_BASE_URL): O
         content: typeof content === "string" ? content : "",
         toolCalls: parseToolCalls(toolCalls),
       };
+    },
+
+    /**
+     * Evict `model` — spec amendment A17.
+     *
+     * `keep_alive: 0` written **unconditionally**, because the value is `0` and
+     * every guard anyone would reach for is a truthiness check. See
+     * `OLLAMA_EVICT_KEEP_ALIVE`.
+     *
+     * No `prompt`, no `stream`, nothing else: the verified request is exactly
+     * `{model, keep_alive: 0}`, and a prompt here would spend an inference to
+     * free memory.
+     */
+    async release(model: string, signal?: AbortSignal): Promise<void> {
+      await post(
+        "/api/generate",
+        { model, keep_alive: OLLAMA_EVICT_KEEP_ALIVE },
+        model,
+        signal,
+      );
     },
   };
 }

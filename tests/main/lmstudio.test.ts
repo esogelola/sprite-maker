@@ -1245,3 +1245,45 @@ describe("transport errors", () => {
     expect(error.message).not.toContain("ollama pull");
   });
 });
+
+// ---------------------------------------------------------------------------
+// release — model residency, spec amendment A17
+// ---------------------------------------------------------------------------
+
+/**
+ * Unloading a model, and the boundary of the evidence for it.
+ *
+ * `POST /api/v1/models/unload` with `{ instance_id }` is what LM Studio's REST
+ * documentation specifies. The field is **not** `model` — every other request in
+ * this file is keyed by `model`, so `model` is what habit writes, and a body LM
+ * Studio ignores is indistinguishable from one it honours when nothing checks.
+ *
+ * Two things stay unverified and are unverifiable here: that a live LM Studio
+ * accepts this body, and that a build without the v1 beta API answers 404 rather
+ * than something else. The second is why the residency runner treats *any*
+ * failure as survivable and the README names LM Studio's own JIT auto-evict as
+ * the supported route.
+ */
+describe("release", () => {
+  it("unloads through LM Studio's documented endpoint, keyed by instance_id", async () => {
+    const fixture = await startServer(replyJson({ instance_id: "qwen3-vl-8b-instruct" }));
+
+    await createLmStudioClient(fixture.baseUrl).release?.("qwen3-vl-8b-instruct");
+
+    const [request] = fixture.requests;
+    expect(request.method).toBe("POST");
+    expect(request.url).toBe("/api/v1/models/unload");
+    expect(request.body).toEqual({ instance_id: "qwen3-vl-8b-instruct" });
+  });
+
+  it("reports a 404 from the unload endpoint rather than swallowing it", async () => {
+    // A build without the v1 beta API answers 404. That is a fact about the
+    // host, and the residency runner is what decides it is survivable — this
+    // client's job is to say what happened.
+    const fixture = await startServer(replyJson({ error: "not found" }, 404));
+
+    await expect(
+      createLmStudioClient(fixture.baseUrl).release?.("qwen3-vl-8b-instruct"),
+    ).rejects.toBeInstanceOf(OllamaHttpError);
+  });
+});

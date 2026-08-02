@@ -73,6 +73,7 @@ import {
 } from "@main/ollama";
 import { MODEL_ROLES, createModelRegistry, type ModelRole } from "@main/models";
 import { accept, applyFeedback, run, type PipelineDeps, type PipelineInput } from "@main/pipeline";
+import { resolveResidency } from "@main/residency";
 import {
   describeProbeFailure,
   isProviderName,
@@ -772,11 +773,25 @@ export function registerIpc(deps: IpcDeps): void {
   async function inspect(): Promise<ProviderView> {
     const status = deps.provider.status();
     const endpoint = modelsEndpoint(status.provider, status.baseUrl);
+
+    // A17. Resolved on every read, never cached: a rebind changes which pair of
+    // models is being weighed, and a cached answer would describe the previous
+    // pair while the picker showed the new one. `resolveResidency` short-circuits
+    // when both roles hold the same model — the shipped case — so the common
+    // path issues no request at all and this read stays as cheap as it was.
+    const residency = await resolveResidency({
+      configured: deps.config.modelResidency,
+      models: registry.roles(),
+      provider: status.provider,
+      baseUrl: status.baseUrl,
+    });
+
     const base = {
       provider: status.provider,
       baseUrl: status.baseUrl,
       source: status.source,
       probes: status.probes.map((probe) => ({ ...probe })),
+      residency,
     };
 
     let reachable: { ok: true } | { ok: false; detail: string };

@@ -138,6 +138,40 @@ export const DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234";
 export const LMSTUDIO_MODELS_PATH = "/v1/models";
 
 /**
+ * LM Studio's **own** listing, not the OpenAI-compatible one — amendment A17.
+ *
+ * `/v1/models` is OpenAI's shape and carries exactly `id, object, created,
+ * owned_by`: no size, no loaded state, and no prospect of either, because the
+ * shape is not LM Studio's to extend. `/api/v0/models` is LM Studio's native
+ * listing and carries `id, object, type, publisher, arch, compatibility_type,
+ * quantization, state, max_context_length`.
+ *
+ * **It carries no size either** — that is the finding, not a hope.
+ * `lmstudio-ai/lmstudio-js#156` is the open request to add one. So A17 probes
+ * this path, reads a size *if a future build reports one*, and otherwise falls
+ * back to a `totalmem()`-derived assumption and says in the UI that it did.
+ * A build without the path answers 404, which is an answer.
+ */
+export const LMSTUDIO_NATIVE_MODELS_PATH = "/api/v0/models";
+
+/**
+ * Where a model is unloaded — amendment A17.
+ *
+ * LM Studio's REST documentation specifies `POST /api/v1/models/unload` with a
+ * body of `{ instance_id }`. **The key is `instance_id`, not `model`** — every
+ * other request this client sends is keyed by `model`, so `model` is what habit
+ * writes, and a body the server ignores is indistinguishable from one it honours
+ * when nothing checks.
+ *
+ * Unverified against a live LM Studio, like everything else in this file. A
+ * build without the v1 beta API answers 404; the residency runner treats any
+ * failure as survivable and the README names LM Studio's own JIT auto-evict
+ * (Developer ▸ Max loaded models) as the supported route in that case. This
+ * client attempts the documented call once and does not fight the host app.
+ */
+export const LMSTUDIO_UNLOAD_PATH = "/api/v1/models/unload";
+
+/**
  * How LM Studio names itself in the errors a user reads — spec A15.
  *
  * The classes are shared with the Ollama path because they describe transport;
@@ -530,6 +564,23 @@ export function createLmStudioClient(
         content: typeof content === "string" ? content : "",
         toolCalls: parseToolCalls(toolCalls),
       };
+    },
+
+    /**
+     * Unload `model` — amendment A17. See `LMSTUDIO_UNLOAD_PATH`.
+     *
+     * Not on `/v1/...` with the rest of this client: the unload is LM Studio's
+     * own API rather than OpenAI's, which is why the body is keyed by
+     * `instance_id` and why a build that predates it answers 404.
+     */
+    async release(model: string, signal?: AbortSignal): Promise<void> {
+      await postJson(
+        `${root}${LMSTUDIO_UNLOAD_PATH}`,
+        { instance_id: model },
+        model,
+        signal,
+        LMSTUDIO_PROVIDER,
+      );
     },
   };
 }

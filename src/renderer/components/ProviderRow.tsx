@@ -144,6 +144,22 @@ export function ProviderRow({
           : (view.error ?? `${view.baseUrl} is not answering`)}
       </span>
 
+      {/*
+        A17. The only place the decision is visible. `policy` is interpolated,
+        never spelled as a literal in one branch: a fixed "sequential" renders
+        identically on the concurrent path this feature exists to leave alone,
+        and nothing else on screen would contradict it. The reason carries the
+        arithmetic, and the row is one line, so it goes on the title in full.
+      */}
+      <span
+        data-testid="provider-residency"
+        data-policy={view.residency.policy}
+        style={styles.residency}
+        title={view.residency.reason}
+      >
+        {view.residency.policy} · {view.residency.reason}
+      </span>
+
       {view.unavailable.length === 0 ? null : (
         <span
           data-testid="provider-unavailable"
@@ -201,4 +217,12 @@ const styles: Record<string, CSSProperties> = {
   up: { color: "rgba(120,220,140,.85)" },
   down: { color: "rgba(240,180,60,.95)" },
   missing: { fontSize: 10, color: "rgba(240,180,60,.95)" },
+  residency: {
+    fontSize: 10,
+    opacity: 0.6,
+    maxWidth: 300,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
 };
